@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    target-branch: "development"
+    schedule:
+      interval: "daily"
+    commit-message:
+      prefix: "chore: deps"
+      include: "scope"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "development"
+    schedule:
+      interval: "daily"
+    commit-message:
+      prefix: "chore: action"
+      include: "scope"
+    labels:
+      - "ci"
+      - "dependencies"
+    open-pull-requests-limit: 5

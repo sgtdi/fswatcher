@@ -1,0 +1,55 @@
+# Binaries and executables
+*.exe
+*.out
+*.app
+*.dll
+*.so
+*.dylib
+
+# Go build artifacts
+/bin/
+/pkg/
+/build/
+/dist/
+
+# Compiled object files
+*.o
+*.a
+*.lo
+*.la
+
+# Dependency directories (vendor when using modules)
+vendor/
+
+# Go module files (cache and package downloads)
+go.work
+go.work.sum
+
+# Test binary
+*.test
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+*.bak
+*.old
+*.DS_Store
+*.vscode/
+*.idea/
+*.history/
+
+# Environment files
+.env
+.env.local
+.envrc
+!.env.example
+
+# GoLand, VSCode, and JetBrains IDE settings
+/.vscode/
+/.idea/
+/*.iml
+
+# Git hooks
+/.git/hooks/

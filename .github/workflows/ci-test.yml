@@ -1,0 +1,76 @@
+name: Go CI Test
+
+on:
+  push:
+    branches:
+      - dev
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: "Test on ${{ matrix.os_name }} (Go ${{ matrix.go-version }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Disabled due to premium runner
+          #- os: macos-25-large
+          #  os_name: macOS 25 (Intel x64)
+          #  go-version: '1.25.3'
+          - os: macos-26
+            os_name: macOS 26 beta (ARM64)
+            go-version: "1.25.3"
+          - os: macos-latest
+            os_name: macOS (ARM64)
+            go-version: "1.25.3"
+          - os: ubuntu-latest
+            os_name: Ubuntu (Linux)
+            go-version: "1.25.3"
+          - os: windows-latest
+            os_name: Windows
+            go-version: "1.25.3"
+
+    timeout-minutes: 10
+
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "Set up Go"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: "Verify Go installation"
+        shell: bash
+        run: |
+          go version
+          go env GOOS GOARCH
+          if [[ "$RUNNER_OS" == "macOS" ]]; then sw_vers; fi
+          if [[ "$RUNNER_OS" == "Linux" ]]; then uname -a; fi
+          if [[ "$RUNNER_OS" == "Windows" ]]; then uname -a; fi
+
+      - name: "Install dependencies"
+        run: go mod download
+
+      - name: "Run tests"
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            go test -v -coverprofile=coverage.out -count=1 ./...
+          else
+            go test -v -race -coverprofile=coverage.out -count=1 ./...
+          fi
+
+      - name: "Upload coverage report"
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-${{ matrix.os }}
+          path: coverage.out
