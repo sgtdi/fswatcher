@@ -134,6 +134,7 @@ func (w *watcher) runInotifyLoop(ctx context.Context, p *inotify, done chan stru
 		close(done)
 	}()
 
+	// Create an epoll instance to manage file descriptors
 	epfd, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
 	if err != nil {
 		w.logError("inotify epoll_create error: %v", err)
@@ -141,25 +142,37 @@ func (w *watcher) runInotifyLoop(ctx context.Context, p *inotify, done chan stru
 	}
 	defer unix.Close(epfd)
 
-	event := unix.EpollEvent{
-		Events: unix.EPOLLIN,
-		Fd:     int32(p.fd),
+	// Create an eventfd to gracefully handle context cancellation
+	eventFD, err := unix.Eventfd(0, unix.EFD_NONBLOCK|unix.EFD_CLOEXEC)
+	if err != nil {
+		w.logError("inotify eventfd error: %v", err)
+		return
 	}
-	if err := unix.EpollCtl(epfd, unix.EPOLL_CTL_ADD, p.fd, &event); err != nil {
-		w.logError("inotify epoll_ctl error: %v", err)
+	defer unix.Close(eventFD)
+
+	// Add the inotify file descriptor to the epoll set to monitor for read events
+	if err := unix.EpollCtl(epfd, unix.EPOLL_CTL_ADD, p.fd, &unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(p.fd)}); err != nil {
+		w.logError("inotify epoll_ctl add inotify error: %v", err)
 		return
 	}
 
+	// Add the eventfd to the epoll set to monitor for shutdown signals
+	if err := unix.EpollCtl(epfd, unix.EPOLL_CTL_ADD, eventFD, &unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(eventFD)}); err != nil {
+		w.logError("inotify epoll_ctl add eventfd error: %v", err)
+		return
+	}
+
+	// Start a goroutine to write to eventfd when the context is canceled, unblocking EpollWait
+	go func() {
+		<-ctx.Done()
+		var val uint64 = 1
+		_, _ = unix.Write(eventFD, (*(*[8]byte)(unsafe.Pointer(&val)))[:])
+	}()
+
 	buf := make([]byte, w.bufferSize)
-	epollEvents := make([]unix.EpollEvent, 1)
+	epollEvents := make([]unix.EpollEvent, 2) // Waiting on two FDs: inotify and eventfd
 
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
 		nEvents, err := unix.EpollWait(epfd, epollEvents, -1)
 		if err != nil {
 			if err == unix.EINTR {
@@ -169,142 +182,144 @@ func (w *watcher) runInotifyLoop(ctx context.Context, p *inotify, done chan stru
 			return
 		}
 
-		if nEvents == 0 {
-			continue
-		}
-
-		n, readErr := unix.Read(p.fd, buf)
-		if n <= 0 {
-			if ctx.Err() != nil {
+		for i := 0; i < nEvents; i++ {
+			if epollEvents[i].Fd == int32(eventFD) {
+				// Shutdown signal
 				return
 			}
-			if readErr != nil && readErr != unix.EAGAIN {
-				w.logError("inotify read error: %v", readErr)
-			}
-			continue
-		}
 
-		now := time.Now()
-		offset := 0
-		for offset < n {
-			if n-offset < unix.SizeofInotifyEvent {
-				break
-			}
-			e := (*unix.InotifyEvent)(unsafe.Pointer(&buf[offset]))
-
-			if e.Mask&unix.IN_Q_OVERFLOW != 0 {
-				w.logError("inotify event queue overflowed")
-				offset += unix.SizeofInotifyEvent
-				continue
-			}
-
-			offset += unix.SizeofInotifyEvent
-
-			var name string
-			if e.Len > 0 {
-				nb := buf[offset : offset+int(e.Len)]
-				nullIndex := bytes.IndexByte(nb, 0)
-				if nullIndex != -1 {
-					name = string(nb[:nullIndex])
-				}
-				offset += int(e.Len)
-			}
-
-			p.mu.RLock()
-			parentWatch, ok := p.wds[int(e.Wd)]
-			p.mu.RUnlock()
-			if !ok {
-				continue
-			}
-
-			path := parentWatch.Path
-			if name != "" {
-				path = filepath.Join(parentWatch.Path, name)
-			}
-
-			if e.Mask&unix.IN_IGNORED != 0 {
-				p.mu.Lock()
-				if ignoredPath, pathOk := p.wds[int(e.Wd)]; pathOk {
-					delete(p.wds, int(e.Wd))
-					if node := p.trie.findNode(ignoredPath.Path); node != nil {
-						node.wd = -1
+			if epollEvents[i].Fd == int32(p.fd) {
+				// Inotify event is ready to be proecessed
+				n, readErr := unix.Read(p.fd, buf)
+				if n <= 0 {
+					if readErr != nil && readErr != unix.EAGAIN {
+						w.logError("inotify read error: %v", readErr)
 					}
-					p.mu.Unlock()
+					continue
+				}
+
+				now := time.Now()
+				offset := 0
+				for offset < n {
+					if n-offset < unix.SizeofInotifyEvent {
+						break
+					}
+					e := (*unix.InotifyEvent)(unsafe.Pointer(&buf[offset]))
+
+					if e.Mask&unix.IN_Q_OVERFLOW != 0 {
+						w.logError("inotify event queue overflowed")
+						offset += unix.SizeofInotifyEvent
+						continue
+					}
+
+					offset += unix.SizeofInotifyEvent
+
+					var name string
+					if e.Len > 0 {
+						nb := buf[offset : offset+int(e.Len)]
+						nullIndex := bytes.IndexByte(nb, 0)
+						if nullIndex != -1 {
+							name = string(nb[:nullIndex])
+						}
+						offset += int(e.Len)
+					}
+
+					p.mu.RLock()
+					parentWatch, ok := p.wds[int(e.Wd)]
+					p.mu.RUnlock()
+					if !ok {
+						continue
+					}
+
+					path := parentWatch.Path
+					if name != "" {
+						path = filepath.Join(parentWatch.Path, name)
+					}
+
+					if e.Mask&unix.IN_IGNORED != 0 {
+						p.mu.Lock()
+						if ignoredPath, pathOk := p.wds[int(e.Wd)]; pathOk {
+							delete(p.wds, int(e.Wd))
+							if node := p.trie.findNode(ignoredPath.Path); node != nil {
+								node.wd = -1
+							}
+							p.mu.Unlock()
+
+							w.handlePlatformEvent(WatchEvent{
+								ID:    0,
+								Path:  ignoredPath.Path,
+								Types: []EventType{EventRemove},
+								Flags: []string{},
+								Time:  now,
+							})
+						} else {
+							p.mu.Unlock()
+						}
+						continue
+					}
+
+					if (e.Mask & (unix.IN_DELETE_SELF | unix.IN_MOVE_SELF)) != 0 {
+						p.mu.Lock()
+						delete(p.wds, int(e.Wd))
+						if node := p.trie.findNode(path); node != nil {
+							node.wd = -1
+						}
+						p.mu.Unlock()
+					}
+
+					isDir := (e.Mask & unix.IN_ISDIR) != 0
+
+					if isDir && ((e.Mask&unix.IN_CREATE) != 0 || (e.Mask&unix.IN_MOVED_TO) != 0) {
+						if parentWatch.Depth != WatchTopLevel {
+							p.addWatch(w, &WatchPath{Path: path, Depth: WatchNested})
+						}
+					}
+
+					if isDir && ((e.Mask&unix.IN_DELETE) != 0 || (e.Mask&unix.IN_MOVED_FROM) != 0) {
+						var childWds []int
+						p.mu.RLock()
+						if node := p.trie.findNode(path); node != nil {
+							for _, childNode := range node.children {
+								childWds = append(childWds, childNode.findAllChildren()...)
+							}
+						}
+						p.mu.RUnlock()
+
+						for _, wd := range childWds {
+							p.mu.RLock()
+							childPath, ok := p.wds[wd]
+							p.mu.RUnlock()
+							if ok {
+								w.handlePlatformEvent(WatchEvent{
+									ID:    0,
+									Path:  childPath.Path,
+									Types: []EventType{EventRemove},
+									Flags: []string{"Synthetic"},
+									Time:  now,
+								})
+							}
+						}
+					}
+
+					types := mapInotifyMask(e.Mask)
+					if len(types) == 0 || path == "" || isSystemFile(path) {
+						continue
+					}
 
 					w.handlePlatformEvent(WatchEvent{
-						ID:    0,
-						Path:  ignoredPath.Path,
-						Types: []EventType{EventRemove},
+						ID:    uint64(e.Cookie),
+						Path:  path,
+						Types: types,
 						Flags: []string{},
 						Time:  now,
 					})
-				} else {
-					p.mu.Unlock()
-				}
-				continue
-			}
-
-			if (e.Mask & (unix.IN_DELETE_SELF | unix.IN_MOVE_SELF)) != 0 {
-				p.mu.Lock()
-				delete(p.wds, int(e.Wd))
-				if node := p.trie.findNode(path); node != nil {
-					node.wd = -1
-				}
-				p.mu.Unlock()
-			}
-
-			isDir := (e.Mask & unix.IN_ISDIR) != 0
-
-			if isDir && ((e.Mask&unix.IN_CREATE) != 0 || (e.Mask&unix.IN_MOVED_TO) != 0) {
-				// Only watch new subdirectories if the parent is not a top-level-only watch
-				if parentWatch.Depth != WatchTopLevel {
-					// Events for existing children are not emitted
-					p.addWatch(w, &WatchPath{Path: path, Depth: WatchNested})
 				}
 			}
-
-			if isDir && ((e.Mask&unix.IN_DELETE) != 0 || (e.Mask&unix.IN_MOVED_FROM) != 0) {
-				var childWds []int
-				p.mu.RLock()
-				if node := p.trie.findNode(path); node != nil {
-					for _, childNode := range node.children {
-						childWds = append(childWds, childNode.findAllChildren()...)
-					}
-				}
-				p.mu.RUnlock()
-
-				for _, wd := range childWds {
-					p.mu.RLock()
-					childPath, ok := p.wds[wd]
-					p.mu.RUnlock()
-					if ok {
-						w.handlePlatformEvent(WatchEvent{
-							ID:    0,
-							Path:  childPath.Path,
-							Types: []EventType{EventRemove},
-							Flags: []string{"Synthetic"},
-							Time:  now,
-						})
-					}
-				}
-			}
-
-			types := mapInotifyMask(e.Mask)
-			if len(types) == 0 || path == "" || isSystemFile(path) {
-				continue
-			}
-
-			w.handlePlatformEvent(WatchEvent{
-				ID:    uint64(e.Cookie),
-				Path:  path,
-				Types: types,
-				Flags: []string{},
-				Time:  now,
-			})
 		}
 	}
 }
 
+// inotifyMask returns the combined inotify event mask for monitoring file system changes
 func inotifyMask() uint32 {
 	return unix.IN_CREATE |
 		unix.IN_DELETE |
@@ -317,6 +332,7 @@ func inotifyMask() uint32 {
 		unix.IN_MOVE_SELF
 }
 
+// mapInotifyMask converts inotify event flags into cross-platform EventType values
 func mapInotifyMask(mask uint32) []EventType {
 	var evs []EventType
 	if mask&unix.IN_CREATE != 0 || mask&unix.IN_MOVED_TO != 0 {
@@ -337,6 +353,7 @@ func mapInotifyMask(mask uint32) []EventType {
 	return uniqueEventTypes(evs)
 }
 
+// addWatch attaches a watch to a directory
 func (p *inotify) addWatch(w *watcher, watchPath *WatchPath) error {
 	path := watchPath.Path
 	p.mu.RLock()
@@ -384,6 +401,7 @@ func (p *inotify) addWatch(w *watcher, watchPath *WatchPath) error {
 	})
 }
 
+// removeWatch removes inotify watches for a path and all its child paths
 func (p *inotify) removeWatch(path string) error {
 	p.mu.RLock()
 	node := p.trie.findNode(path)
@@ -405,11 +423,13 @@ func (p *inotify) removeWatch(path string) error {
 	return nil
 }
 
+// isSubpath reports whether the child path is inside the parent directory
 func isSubpath(parent, child string) bool {
 	rel, err := filepath.Rel(parent, child)
 	return err == nil && rel != "." && rel != ".." && !startsWithDotDot(rel)
 }
 
+// startsWithDotDot checks if a relative path string starts with "../"
 func startsWithDotDot(rel string) bool {
 	return len(rel) >= 2 && rel[:2] == ".."
 }
