@@ -44,7 +44,7 @@ This library was created to address common challenges found in other file system
 | **System file ignore**| ✅ Automatic (e.g., `.git`, `.DS_Store`) | ❌ Manual implementation required |
 | **Logging** | ✅ Built-in structured logging | ❌ Manual implementation required |
 
-## Workflow diagram
+## Workflow
 
 The watcher operates in a clear, multi-stage pipeline that processes events concurrently. Each raw event from the OS goes through the following stages:
 
