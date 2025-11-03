@@ -405,14 +405,17 @@ func (p *inotify) addWatch(w *watcher, watchPath *WatchPath) error {
 func (p *inotify) removeWatch(path string) error {
 	p.mu.RLock()
 	node := p.trie.findNode(path)
-	p.mu.RUnlock()
-
 	if node == nil {
+		p.mu.RUnlock()
 		return newError("remove_watch", path, errors.New("watch not found for path"))
 	}
 
+	// Hold the read lock during the entire traversal
 	wdsToRemove := node.findAllChildren()
+	p.mu.RUnlock()
+
 	if len(wdsToRemove) == 0 {
+		// Node exists but has no associated watch descriptor
 		return newError("remove_watch", path, errors.New("watch not found for path"))
 	}
 
