@@ -145,9 +145,9 @@ Customize the watcher's behavior using functional options passed to `fswatcher.N
 
 | Option | Description | Default |
 | :--- | :--- | :--- |
-| `WithPath(path, ...)` | Adds an initial directory to watch. Must be a valid directory path. Can be called multiple times to watch multiple directories. Takes optional `PathOption` values, such as `WithDepth(WatchTopLevel)` to disable recursive watching for that specific path. | (Watches current directory if no path is provided) |
+| `WithPath(path, ...)` | Adds an initial directory to watch. Must be a valid directory path. Can be called multiple times to watch multiple directories. Takes optional `PathOption` values, such as `WithDepth(WatchTopLevel)` to disable recursive watching for that specific path. | Current directory |
 | `WithCooldown(d)` | Sets the debouncing cooldown period. Events for the same path arriving within this duration will be merged. | `100ms` |
-| `WithBufferSize(size)` | Sets the size of the main event channel. | `1024` |
+| `WithBufferSize(size)` | Sets the size of the main event channel. | `4096` |
 | `WithIncRegex(patterns)` | Sets a slice of regex patterns for paths to include. If a path matches any of these patterns, it will be processed. If this option is not used, all non-excluded paths are processed by default. | (none) |
 | `WithExcRegex(patterns)` | Sets a slice of regex patterns for paths to exclude. If a path matches any of these patterns, it will be ignored. Exclusions always take precedence over inclusions. | (none) |
 | `WithEventBatching(d)` | Enables and configures event batching. Multiple events for the same path within the duration are merged. | (disabled) |
