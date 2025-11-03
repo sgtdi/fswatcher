@@ -2,7 +2,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/sgtdi/fswatcher)](https://goreportcard.com/report/github.com/sgtdi/fswatcher)
 [![CI](https://github.com/sgtdi/fswatcher/actions/workflows/ci-test.yml/badge.svg)](https://github.com/sgtdi/fswatcher/actions/workflows/ci-test.yml)
 [![CodeQL](https://github.com/sgtdi/fswatcher/actions/workflows/codeql.yml/badge.svg)](https://github.com/sgtdi/fswatcher/actions/workflows/codeql.yml)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 # FSWatcher
 
@@ -35,7 +35,7 @@ FSWatcher uses native OS APIs for efficient, low-overhead monitoring with near-z
 
 This library was created to address common challenges found in other file system watchers, such as event batching, debouncing, and simplified configuration.
 
-| Feature | FSWatcher | Generic Alternatives |
+| Feature | FSWatcher | Similar projects |
 | :--- | :--- | :--- |
 | **Event debouncing** | ✅ Built-in (configurable cooldown) | ❌ Manual implementation required |
 | **Event batching** | ✅ Built-in (configurable duration) | ❌ Manual implementation required |
@@ -205,4 +205,4 @@ The log level determines the minimum severity of messages that will be logged. T
 
 **4. Can I watch files, or only directories?**
 
-> All underlying native APIs (FSEvents, inotify, ReadDirectoryChangesW) are designed to watch directories. FSWatcher follows this model. To watch a single file, you must watch its parent directory and use a filter to include only events for that specific file.
+> FSWatcher's API is designed to watch directories. This is to ensure consistent, predictable behavior across all platforms (macOS, Windows, and Linux). It is important to be aware of the limitations of the underlying Linux `inotify` backend cause it can struggle with very large or deep directory trees
