@@ -107,7 +107,8 @@ import (
 )
 
 func main() {
-	// 1. Create a new watcher instance
+
+	// Create a new fswatcher instance
 	fsw, err := fswatcher.New(
 		fswatcher.WithPath("./"),
 		fswatcher.WithLogLevel(fswatcher.LogLevelDebug),
@@ -116,7 +117,7 @@ func main() {
 		log.Fatalf("Failed to create watcher: %v", err)
 	}
 
-	// Start the watcher in a separate goroutine
+	// Start the watcher in a goroutine
 	ctx, _ := context.WithCancel(context.Background())
 	go func() {
 		log.Println("Watcher started.")
