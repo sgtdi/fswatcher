@@ -101,6 +101,29 @@ package main
 import (
 	"context"
 	"fmt"
+
+	"github.com/sgtdi/fswatcher"
+)
+
+func main() {
+	fsw, _ := fswatcher.New()
+	ctx, _ := context.WithCancel(context.Background())
+	go fsw.Watch(ctx)
+	// Watch for events
+	for e := range fsw.Events() {
+	    fmt.Println(e.String())
+	}
+}
+```
+
+This more advanced example shows how to configure the watcher with a specific path and log level, run it in a goroutine, and handle events in a `select` loop.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
 	"log"
 
 	"github.com/sgtdi/fswatcher"
@@ -108,7 +131,7 @@ import (
 
 func main() {
 
-	// Create a new fswatcher instance
+	// Create a new fswatcher instance with options
 	fsw, err := fswatcher.New(
 		fswatcher.WithPath("./"),
 		fswatcher.WithLogLevel(fswatcher.LogLevelDebug),
