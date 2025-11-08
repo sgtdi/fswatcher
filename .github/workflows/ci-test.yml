@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   test:
-    name: "Test on ${{ matrix.os_name }} (Go ${{ matrix.go-version }})"
+    name: "Test on ${{ matrix.os_name }} (Go ${{ env.GO_VERSION }})"
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -25,19 +25,14 @@ jobs:
           # Disabled due to premium runner
           #- os: macos-25-large
           #  os_name: macOS 25 (Intel x64)
-          #  go-version: '1.25.3'
           - os: macos-26
             os_name: macOS 26 beta (ARM64)
-            go-version: "1.25.3"
           - os: macos-latest
             os_name: macOS (ARM64)
-            go-version: "1.25.3"
           - os: ubuntu-latest
             os_name: Ubuntu (Linux)
-            go-version: "1.25.3"
           - os: windows-latest
             os_name: Windows
-            go-version: "1.25.3"
 
     timeout-minutes: 10
 
@@ -45,10 +40,14 @@ jobs:
       - name: "Checkout repository"
         uses: actions/checkout@v5
 
+      - name: "Get Go version"
+        id: go-version
+        run: echo "GO_VERSION=$(grep -o 'go [0-9]\+\.[0-9]\+\(\.[0-9]\+\)\?' go.mod | awk '{print $2}')" >> $GITHUB_ENV
+
       - name: "Set up Go"
         uses: actions/setup-go@v6
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: ${{ env.GO_VERSION }}
 
       - name: "Verify Go installation"
         shell: bash
