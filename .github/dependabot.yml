@@ -2,7 +2,7 @@ version: 2
 updates:
   - package-ecosystem: "gomod"
     directory: "/"
-    target-branch: "development"
+    target-branch: "main"
     schedule:
       interval: "daily"
     commit-message:
@@ -14,7 +14,7 @@ updates:
 
   - package-ecosystem: "github-actions"
     directory: "/"
-    target-branch: "development"
+    target-branch: "main"
     schedule:
       interval: "daily"
     commit-message:
@@ -23,4 +23,4 @@ updates:
     labels:
       - "ci"
       - "dependencies"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
