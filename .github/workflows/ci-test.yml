@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   test:
-    name: "Test on ${{ matrix.os_name }} (Go ${{ env.GO_VERSION }})"
+    name: "Test on ${{ matrix.os_name }}"
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
