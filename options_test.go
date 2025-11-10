@@ -126,7 +126,7 @@ func TestWatcherOptions(t *testing.T) {
 
 			opt(w)
 			if w.logFile != nil {
-				defer w.logFile.Close()
+				defer func() { _ = w.logFile.Close() }()
 			}
 
 			require.NotNil(t, w.logger, "Logger should be configured")
@@ -230,7 +230,7 @@ func TestWatcherOptions(t *testing.T) {
 			filePath := filepath.Join(tempDir, "file.txt")
 			f, err := os.Create(filePath)
 			require.NoError(t, err)
-			f.Close()
+			_ = f.Close()
 
 			w := &watcher{}
 			opt := WithPath(filePath)

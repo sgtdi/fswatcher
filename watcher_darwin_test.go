@@ -17,7 +17,7 @@ import (
 func TestWatcher_Darwin(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "TestWatcher_Darwin*")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	tempDir, err = filepath.EvalSymlinks(tempDir)
 	require.NoError(t, err)
@@ -32,7 +32,7 @@ func TestWatcher_Darwin(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		w.Watch(ctx)
+		_ = w.Watch(ctx)
 	}()
 
 	time.Sleep(100 * time.Millisecond) // Give the watcher time to start
@@ -51,7 +51,7 @@ func TestWatcher_Darwin(t *testing.T) {
 	testFile := filepath.Join(tempDir, "test.txt")
 	f, err := os.Create(testFile)
 	require.NoError(t, err)
-	f.Close()
+	_ = f.Close()
 
 	select {
 	case <-done:

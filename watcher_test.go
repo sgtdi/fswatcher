@@ -60,7 +60,7 @@ func TestMain(m *testing.M) {
 
 	exitCode := m.Run()
 
-	os.RemoveAll(tempDir)
+	_ = os.RemoveAll(tempDir)
 	os.Exit(exitCode)
 }
 
@@ -175,14 +175,14 @@ func TestWatcher(t *testing.T) {
 		// Additional temp dir
 		tempT, _ := os.MkdirTemp("", "temp-*")
 		dirT, _ := filepath.EvalSymlinks(tempT)
-		defer os.RemoveAll(dirT)
+		defer func() { _ = os.RemoveAll(dirT) }()
 
 		w, err := New(WithPath(tempDir))
 		require.NoError(t, err)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		go w.Watch(ctx)
+		go func() { _ = w.Watch(ctx) }()
 		time.Sleep(100 * time.Millisecond)
 		require.True(t, w.IsRunning())
 
@@ -229,13 +229,13 @@ func TestWatcher(t *testing.T) {
 	t.Run("DropPath", func(t *testing.T) {
 		firstDir, err := os.MkdirTemp("", "temp-*")
 		require.NoError(t, err)
-		defer os.RemoveAll(firstDir)
+		defer func() { _ = os.RemoveAll(firstDir) }()
 		firstDir, err = filepath.EvalSymlinks(firstDir)
 		require.NoError(t, err)
 
 		secondDir, err := os.MkdirTemp("", "temp-*")
 		require.NoError(t, err)
-		defer os.RemoveAll(secondDir)
+		defer func() { _ = os.RemoveAll(secondDir) }()
 		secondDir, err = filepath.EvalSymlinks(secondDir)
 		require.NoError(t, err)
 
@@ -245,7 +245,7 @@ func TestWatcher(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		go w.Watch(ctx)
+		go func() { _ = w.Watch(ctx) }()
 		time.Sleep(100 * time.Millisecond)
 		require.True(t, w.IsRunning())
 
@@ -412,7 +412,7 @@ func TestWatcher(t *testing.T) {
 		assert.WithinDuration(t, time.Now(), stats.StartTime, 1*time.Second)
 
 		ctx, cancel := context.WithCancel(context.Background())
-		go w.Watch(ctx)
+		go func() { _ = w.Watch(ctx) }()
 		time.Sleep(50 * time.Millisecond)
 
 		stats = w.Stats()
@@ -481,7 +481,7 @@ func performOperations(t *testing.T, basePath string, numOps int) map[string]str
 	}
 
 	buildOps := numOps / 2
-	for _ = range buildOps {
+	for range buildOps {
 		op := randInt(0, 1)
 		switch op {
 		case 0: // Create File
@@ -510,7 +510,7 @@ func performOperations(t *testing.T, basePath string, numOps int) map[string]str
 	time.Sleep(100 * time.Millisecond)
 
 	actionOps := numOps - buildOps
-	for _ = range actionOps {
+	for range actionOps {
 		op := randInt(0, 3)
 		switch op {
 		case 0: // Modify File
@@ -553,7 +553,7 @@ func performOperations(t *testing.T, basePath string, numOps int) map[string]str
 			dirToDelete := dirs[dirIdx]
 			logAction("DELETE D", dirToDelete)
 
-			filepath.Walk(dirToDelete, func(path string, info os.FileInfo, err error) error {
+			_ = filepath.Walk(dirToDelete, func(path string, info os.FileInfo, err error) error {
 				if err == nil {
 					expectedPaths[path] = "DELETE D"
 				}
