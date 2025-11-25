@@ -37,7 +37,7 @@ func TestWatcherOptions(t *testing.T) {
 	t.Run("WithIncRegex", func(t *testing.T) {
 		w := &watcher{}
 		expectedPatterns := []string{`\.go$`, `\.mod$`}
-		opt := WithIncRegex(expectedPatterns)
+		opt := WithIncRegex(expectedPatterns...)
 
 		opt(w)
 
@@ -47,7 +47,7 @@ func TestWatcherOptions(t *testing.T) {
 	t.Run("WithExcRegex", func(t *testing.T) {
 		w := &watcher{}
 		expectedPatterns := []string{`_test\.go$`}
-		opt := WithExcRegex(expectedPatterns)
+		opt := WithExcRegex(expectedPatterns...)
 
 		opt(w)
 
@@ -87,14 +87,14 @@ func TestWatcherOptions(t *testing.T) {
 		assert.Equal(t, readyChan, w.readyChan)
 	})
 
-	t.Run("WithLogLevel", func(t *testing.T) {
+	t.Run("WithLogSeverity", func(t *testing.T) {
 		w := &watcher{}
-		expectedLevel := LogLevelError
-		opt := WithLogLevel(expectedLevel)
+		expectedLevel := SeverityError
+		opt := WithLogSeverity(expectedLevel)
 
 		opt(w)
 
-		assert.Equal(t, expectedLevel, w.logLevel)
+		assert.Equal(t, expectedLevel, w.severity)
 	})
 
 	t.Run("WithLogFile", func(t *testing.T) {
@@ -146,7 +146,7 @@ func TestWatcherOptions(t *testing.T) {
 			mw := &mockWriter{}
 			w := &watcher{
 				logger:   log.New(mw, "", 0),
-				logLevel: LogLevelDebug,
+				severity: SeverityDebug,
 			}
 			opt := WithLogFile(invalidPath)
 
