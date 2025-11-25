@@ -14,17 +14,17 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestLogLevel_String tests LogLevel string
-func TestLogLevel_String(t *testing.T) {
+// TestLogSeverity_String tests LogSeverity string
+func TestLogSeverity_String(t *testing.T) {
 	testCases := []struct {
-		level    LogLevel
+		level    LogSeverity
 		expected string
 	}{
-		{LogLevelError, "ERROR"},
-		{LogLevelWarn, "WARN"},
-		{LogLevelInfo, "INFO"},
-		{LogLevelDebug, "DEBUG"},
-		{LogLevel(99), "UNKNOWN"}, // Edge case
+		{SeverityError, "ERROR"},
+		{SeverityWarn, "WARN"},
+		{SeverityInfo, "INFO"},
+		{SeverityDebug, "DEBUG"},
+		{LogSeverity(99), "UNKNOWN"}, // Edge case
 	}
 
 	for _, tc := range testCases {
@@ -36,7 +36,7 @@ func TestLogLevel_String(t *testing.T) {
 
 // TestLogger_OutputRouting tests logs on stdout/stderr
 func TestLogger_OutputRouting(t *testing.T) {
-	w := &watcher{path: "/test/path", logLevel: LogLevelDebug}
+	w := &watcher{path: "/test/path", severity: SeverityDebug}
 
 	base := filepath.Base(w.path) // "path"
 
@@ -52,7 +52,7 @@ func TestLogger_OutputRouting(t *testing.T) {
 		var buf bytes.Buffer
 		_, _ = io.Copy(&buf, r)
 
-		expected := fmt.Sprintf("%s [%s] info message", LogLevelInfo.Emoji(), base)
+		expected := fmt.Sprintf("%s [%s] info message", SeverityInfo.Emoji(), base)
 		assert.Contains(t, buf.String(), expected)
 	})
 
@@ -68,7 +68,7 @@ func TestLogger_OutputRouting(t *testing.T) {
 		var buf bytes.Buffer
 		_, _ = io.Copy(&buf, r)
 
-		expected := fmt.Sprintf("%s [%s] error message", LogLevelError.Emoji(), base)
+		expected := fmt.Sprintf("%s [%s] error message", SeverityError.Emoji(), base)
 		assert.Contains(t, buf.String(), expected)
 	})
 
@@ -84,7 +84,7 @@ func TestLogger_OutputRouting(t *testing.T) {
 		var buf bytes.Buffer
 		_, _ = io.Copy(&buf, r)
 
-		expected := fmt.Sprintf("%s [%s] warn message", LogLevelWarn.Emoji(), base)
+		expected := fmt.Sprintf("%s [%s] warn message", SeverityWarn.Emoji(), base)
 		assert.Contains(t, buf.String(), expected)
 	})
 }
@@ -94,7 +94,7 @@ func TestLogger_LevelFiltering(t *testing.T) {
 	mw := &mockWriter{}
 	w := &watcher{
 		path:     "/test/path",
-		logLevel: LogLevelInfo, // Set level to INFO
+		severity: SeverityInfo, // Set level to INFO
 		logger:   log.New(mw, "", 0),
 	}
 
@@ -117,39 +117,62 @@ func TestLogger_LevelFiltering(t *testing.T) {
 	messages := mw.getMessages()
 	assert.Equal(t, 1, len(messages))
 
-	expected := fmt.Sprintf("%s [%s] this should be logged", LogLevelInfo.Emoji(), base)
+	expected := fmt.Sprintf("%s [%s] this should be logged", SeverityInfo.Emoji(), base)
 	assert.Contains(t, messages[0], expected)
 }
 
 // TestLogger_FileLogging tests logs written on file logger
 func TestLogger_FileLogging(t *testing.T) {
-	// Redirect stdout to silence it
-	orig := os.Stdout
-	r, wFile, _ := os.Pipe()
-	os.Stdout = wFile
+	t.Run("WithLogFile", func(t *testing.T) {
+		// Custom logger
+		mw := &mockWriter{}
+		w := &watcher{
+			path:     "/test/path",
+			severity: SeverityDebug,
+			logger:   log.New(mw, "PREFIX: ", 0),
+		}
+		base := filepath.Base(w.path)
 
-	mw := &mockWriter{}
-	w := &watcher{
-		path:     "/test/path",
-		logLevel: LogLevelDebug,
-		logger:   log.New(mw, "PREFIX: ", 0),
-	}
+		// Capture stdout and stderr
+		origStdout := os.Stdout
+		rStdout, wStdout, _ := os.Pipe()
+		os.Stdout = wStdout
 
-	base := filepath.Base(w.path)
+		origStderr := os.Stderr
+		rStderr, wStderr, _ := os.Pipe()
+		os.Stderr = wStderr
 
-	w.logInfo("message for file")
+		// Log messages
+		w.logInfo("message for file")
+		w.logError("error for file")
 
-	// Restore and discard stdout
-	_ = wFile.Close()
-	os.Stdout = orig
-	_, _ = io.Copy(io.Discard, r)
+		// Capture their output
+		wStdout.Close()
+		os.Stdout = origStdout
+		var stdoutBuf bytes.Buffer
+		_, _ = io.Copy(&stdoutBuf, rStdout)
 
-	messages := mw.getMessages()
-	assert.Equal(t, 1, len(messages))
+		wStderr.Close()
+		os.Stderr = origStderr
+		var stderrBuf bytes.Buffer
+		_, _ = io.Copy(&stderrBuf, rStderr)
 
-	assert.Contains(t, messages[0], "PREFIX: ")
-	expected := fmt.Sprintf("%s [%s] message for file", LogLevelInfo.Emoji(), base)
-	assert.Contains(t, messages[0], expected)
+		messages := mw.getMessages()
+		assert.Equal(t, 2, len(messages), "should log two messages")
+
+		// Check custom logger output
+		assert.Contains(t, messages[0], "PREFIX: ")
+		expectedInfo := fmt.Sprintf("%s [%s] message for file", SeverityInfo.Emoji(), base)
+		assert.Contains(t, messages[0], expectedInfo)
+
+		assert.Contains(t, messages[1], "PREFIX: ")
+		expectedError := fmt.Sprintf("%s [%s] error for file", SeverityError.Emoji(), base)
+		assert.Contains(t, messages[1], expectedError)
+
+		// Check stdout and stderr
+		assert.Empty(t, stdoutBuf.String(), "stdout should be empty when custom logger is used")
+		assert.Empty(t, stderrBuf.String(), "stderr should be empty when custom logger is used")
+	})
 }
 
 // TestLogger_Concurrency tests multiple goroutines log calls without race conditions
@@ -162,7 +185,7 @@ func TestLogger_Concurrency(t *testing.T) {
 	mw := &mockWriter{}
 	w := &watcher{
 		path:     "/test/path",
-		logLevel: LogLevelDebug,
+		severity: SeverityDebug,
 		logger:   log.New(mw, "", 0),
 	}
 

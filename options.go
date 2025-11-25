@@ -28,14 +28,14 @@ func WithBufferSize(size int) WatcherOpt {
 
 // WithIncRegex sets the regex patterns for paths to include
 // If no patterns are provided, all non-excluded paths are included.
-func WithIncRegex(patterns []string) WatcherOpt {
+func WithIncRegex(patterns ...string) WatcherOpt {
 	return func(w *watcher) {
 		w.incRegexPatterns = patterns
 	}
 }
 
 // WithExcRegex sets the regex patterns for paths to exclude; exclusions take precedence over inclusions
-func WithExcRegex(patterns []string) WatcherOpt {
+func WithExcRegex(patterns ...string) WatcherOpt {
 	return func(w *watcher) {
 		w.excRegexPatterns = patterns
 	}
@@ -86,10 +86,10 @@ func WithLogFile(path string) WatcherOpt {
 	}
 }
 
-// WithLogLevel sets the logging verbosity (default is LogLevelWarn)
-func WithLogLevel(level LogLevel) WatcherOpt {
+// WithLogSeverity sets the logging verbosity (default is SeverityWarn)
+func WithLogSeverity(level LogSeverity) WatcherOpt {
 	return func(w *watcher) {
-		w.logLevel = level
+		w.severity = level
 	}
 }
 
@@ -100,28 +100,24 @@ func WithPath(path string, options ...PathOption) WatcherOpt {
 			return
 		}
 
-		// Default to watching nested directories
-		watchPath := &WatchPath{Path: path}
-
+		// Create a temporary WatchPath to apply options and get depth
+		tempWp := &WatchPath{Path: path, Depth: WatchNested}
 		for _, opt := range options {
-			opt(watchPath)
+			opt(tempWp)
 		}
 
-		cleanPath, err := validatePath(watchPath.Path)
+		// Validate the path using the new centralized function
+		wp, err := validateWatchPath(path, tempWp.Depth)
 		if err != nil {
-			w.init = newError("validate_path", watchPath.Path, err)
+			w.init = err
 			return
 		}
-		if info, err := os.Stat(cleanPath); err != nil {
-			w.init = newError("access_path", cleanPath, err)
-			return
-		} else if !info.IsDir() {
-			w.init = newError("validate_path", cleanPath, errors.New("path must be a directory"))
-			return
-		}
-		watchPath.Path = cleanPath
 
-		w.paths = append(w.paths, watchPath)
+		// Preserve other options like filter and event mask that were set on tempWp
+		wp.filter = tempWp.filter
+		wp.eventMask = tempWp.eventMask
+
+		w.paths = append(w.paths, wp)
 	}
 }
 
@@ -163,39 +159,44 @@ func WithEventMask(eventTypes ...EventType) PathOption {
 	}
 }
 
-// validatePath cleans and validates a path string
-func validatePath(path string) (string, error) {
-	if path == "" {
-		return "", errors.New("watch path cannot be empty")
-	}
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("failed to get absolute path: %w", err)
-	}
-	return absPath, nil
-}
-
 // validateWatchPath creates and validates a WatchPath struct
 func validateWatchPath(path string, depth WatchDepth) (*WatchPath, error) {
-	cleanPath, err := validatePath(path)
-	if err != nil {
-		// Wrap the error for context
-		return nil, newError("validate_path", path, err)
+	if path == "" {
+		return nil, newError("ValidateWatchPath", "", errors.New("path cannot be empty"))
 	}
 
-	info, err := os.Stat(cleanPath)
+	var cleanPath string
+	info, err := os.Stat(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, newError("access_path", cleanPath, fmt.Errorf("path does not exist: %w", err))
+		if !os.IsNotExist(err) {
+			return nil, newError("ValidateWatchPath", path, fmt.Errorf("failed to stat path: %w", err))
 		}
-		return nil, newError("access_path", cleanPath, fmt.Errorf("cannot access path: %w", err))
+
+		// Path does not exist, try from working directory
+		cwd, getwdErr := os.Getwd()
+		if getwdErr != nil {
+			return nil, newError("ValidateWatchPath", "", fmt.Errorf("could not get working directory: %w", getwdErr))
+		}
+		cleanPath = filepath.Join(cwd, path)
+
+		info, err = os.Stat(cleanPath)
+		if err != nil {
+			return nil, newError("ValidateWatchPath", path, errors.New("path does not exist as provided or relative to working directory"))
+		}
+	} else {
+		cleanPath = path
 	}
 
 	if !info.IsDir() {
-		return nil, newError("validate_path", cleanPath, errors.New("path must be a directory, not a file"))
+		return nil, newError("ValidateWatchPath", cleanPath, errors.New("path is not a directory"))
 	}
 
-	return &WatchPath{Path: cleanPath, Depth: depth}, nil
+	absPath, err := filepath.Abs(cleanPath)
+	if err != nil {
+		return nil, newError("ValidateWatchPath", cleanPath, fmt.Errorf("failed to get absolute path: %w", err))
+	}
+
+	return &WatchPath{Path: absPath, Depth: depth}, nil
 }
 
 // PlatformLinux specifies which Linux backend to use

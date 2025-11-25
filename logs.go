@@ -7,44 +7,44 @@ import (
 	"time"
 )
 
-// LogLevel defines the logging verbosity
-type LogLevel int
+// LogSeverity defines the logging verbosity
+type LogSeverity int
 
 // Logging levels
 const (
-	LogLevelNone LogLevel = iota
-	LogLevelError
-	LogLevelWarn
-	LogLevelInfo
-	LogLevelDebug
+	SeverityNone LogSeverity = iota
+	SeverityError
+	SeverityWarn
+	SeverityInfo
+	SeverityDebug
 )
 
-// String returns the string representation of a LogLevel
-func (l LogLevel) String() string {
+// String returns the string representation of a LogSeverity
+func (l LogSeverity) String() string {
 	switch l {
-	case LogLevelError:
+	case SeverityError:
 		return "ERROR"
-	case LogLevelWarn:
+	case SeverityWarn:
 		return "WARN"
-	case LogLevelInfo:
+	case SeverityInfo:
 		return "INFO"
-	case LogLevelDebug:
+	case SeverityDebug:
 		return "DEBUG"
 	default:
 		return "UNKNOWN"
 	}
 }
 
-// Emoji returns a simple emoji for a LogLevel
-func (l LogLevel) Emoji() string {
+// Emoji returns a simple emoji for a LogSeverity
+func (l LogSeverity) Emoji() string {
 	switch l {
-	case LogLevelError:
+	case SeverityError:
 		return "🚨"
-	case LogLevelWarn:
+	case SeverityWarn:
 		return "⚠️"
-	case LogLevelInfo:
+	case SeverityInfo:
 		return "ℹ️"
-	case LogLevelDebug:
+	case SeverityDebug:
 		return "🐛"
 	default:
 		return "❓"
@@ -52,8 +52,8 @@ func (l LogLevel) Emoji() string {
 }
 
 // log handles leveled logging
-func (w *watcher) log(level LogLevel, format string, args ...any) {
-	if level > w.logLevel {
+func (w *watcher) log(level LogSeverity, format string, args ...any) {
+	if level > w.severity {
 		return
 	}
 
@@ -66,36 +66,36 @@ func (w *watcher) log(level LogLevel, format string, args ...any) {
 
 	logLine := fmt.Sprintf("%s %s", prefix, msg)
 
-	// Route to stderr for errors and warnings
-	switch level {
-	case LogLevelError, LogLevelWarn:
-		fmt.Fprintln(os.Stderr, logLine)
-	default:
-		fmt.Println(logLine)
-	}
-
 	// Write to a log file if configured
 	if w.logger != nil {
 		w.logger.Println(logLine)
+	} else {
+		// Route to stderr for errors and warnings
+		switch level {
+		case SeverityError, SeverityWarn:
+			fmt.Fprintln(os.Stderr, logLine)
+		default:
+			fmt.Println(logLine)
+		}
 	}
 }
 
 // logError logs an Error level message
 func (w *watcher) logError(format string, args ...any) {
-	w.log(LogLevelError, format, args...)
+	w.log(SeverityError, format, args...)
 }
 
 // logWarn logs a Warn level message
 func (w *watcher) logWarn(format string, args ...any) {
-	w.log(LogLevelWarn, format, args...)
+	w.log(SeverityWarn, format, args...)
 }
 
 // logInfo logs an Info level message
 func (w *watcher) logInfo(format string, args ...any) {
-	w.log(LogLevelInfo, format, args...)
+	w.log(SeverityInfo, format, args...)
 }
 
 // logDebug logs a Debug level message
 func (w *watcher) logDebug(format string, args ...any) {
-	w.log(LogLevelDebug, format, args...)
+	w.log(SeverityDebug, format, args...)
 }
