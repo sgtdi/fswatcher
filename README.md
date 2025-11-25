@@ -134,7 +134,7 @@ func main() {
 	// Create a new fswatcher instance with options
 	fsw, err := fswatcher.New(
 		fswatcher.WithPath("./"),
-		fswatcher.WithLogLevel(fswatcher.LogLevelDebug),
+		fswatcher.WithLogSeverity(fswatcher.SeverityDebug),
 	)
 	if err != nil {
 		log.Fatalf("Failed to create watcher: %v", err)
@@ -167,18 +167,18 @@ func main() {
 
 Customize the watcher's behavior using functional options passed to `fswatcher.New()`.
 
-| Option | Description | Default |
-| :--- | :--- | :--- |
-| `WithPath(path, ...)` | Adds an initial directory to watch. Must be a valid directory path. Can be called multiple times to watch multiple directories. Takes optional `PathOption` values, such as `WithDepth(WatchTopLevel)` to disable recursive watching for that specific path. | Current directory |
-| `WithCooldown(d)` | Sets the debouncing cooldown period. Events for the same path arriving within this duration will be merged. | `100ms` |
-| `WithBufferSize(size)` | Sets the size of the main event channel. | `4096` |
-| `WithIncRegex(patterns)` | Sets a slice of regex patterns for paths to include. If a path matches any of these patterns, it will be processed. If this option is not used, all non-excluded paths are processed by default. | (none) |
-| `WithExcRegex(patterns)` | Sets a slice of regex patterns for paths to exclude. If a path matches any of these patterns, it will be ignored. Exclusions always take precedence over inclusions. | (none) |
-| `WithEventBatching(d)` | Enables and configures event batching. Multiple events for the same path within the duration are merged. | (disabled) |
-| `WithLogLevel(level)` | Sets the logging verbosity (`LogLevelDebug`, `LogLevelInfo`, `LogLevelWarn`, `LogLevelError`). | `LogLevelWarn` |
-| `WithLogFile(path)` | Sets a file for logging. Use `"stdout"` to log to the console or `""` to disable. | (disabled) |
-| `WithLinuxPlatform(p)` | Sets a specific backend (`PlatformInotify` or `PlatformFanotify`) on Linux. | `PlatformInotify` |
-| `WithDepth(depth)` | Sets the watch depth for a specific path (`WatchNested` or `WatchTopLevel`). This option is passed to `WithPath`. | `WatchNested` |
+| Option                      | Description | Default |
+|:----------------------------| :--- | :--- |
+| `WithPath(path, ...)`       | Adds an initial directory to watch. Must be a valid directory path. Can be called multiple times to watch multiple directories. Takes optional `PathOption` values, such as `WithDepth(WatchTopLevel)` to disable recursive watching for that specific path. | Current directory |
+| `WithCooldown(d)`           | Sets the debouncing cooldown period. Events for the same path arriving within this duration will be merged. | `100ms` |
+| `WithBufferSize(size)`      | Sets the size of the main event channel. | `4096` |
+| `WithIncRegex(patterns...)` | Sets a slice of regex patterns for paths to include. If a path matches any of these patterns, it will be processed. If this option is not used, all non-excluded paths are processed by default. | (none) |
+| `WithExcRegex(patterns...)` | Sets a slice of regex patterns for paths to exclude. If a path matches any of these patterns, it will be ignored. Exclusions always take precedence over inclusions. | (none) |
+| `WithEventBatching(d)`      | Enables and configures event batching. Multiple events for the same path within the duration are merged. | (disabled) |
+| `WithLogSeverity(level)`    | Sets the logging verbosity (`SeverityDebug`, `SeverityInfo`, `SeverityWarn`, `SeverityError`). | `SeverityWarn` |
+| `WithLogFile(path)`         | Sets a file for logging. Use `"stdout"` to log to the console or `""` to disable. | (disabled) |
+| `WithLinuxPlatform(p)`      | Sets a specific backend (`PlatformInotify` or `PlatformFanotify`) on Linux. | `PlatformInotify` |
+| `WithDepth(depth)`          | Sets the watch depth for a specific path (`WatchNested` or `WatchTopLevel`). This option is passed to `WithPath`. | `WatchNested` |
 
 ## Watcher methods
 
@@ -199,17 +199,17 @@ Once you have a `Watcher` instance from `New()`, you can use the following metho
 
 FSWatcher includes a built-in structured logger to help with debugging and monitoring. You can control the verbosity and output destination using `WatcherOpt` functions.
 
-### Log Levels
+### Log Severity
 
-The log level determines the minimum severity of messages that will be logged. The available levels are:
+The log severity determines the minimum severity of messages that will be logged. The available levels are:
 
 | Level | Description |
 | :--- | :--- |
-| `LogLevelNone` | No messages will be logged. |
-| `LogLevelError` | 🚨 Only critical errors will be logged (e.g., platform failures). |
-| `LogLevelWarn` | ⚠️ Errors and warnings will be logged (e.g., event queue overflows). This is the default. |
-| `LogLevelInfo` | ℹ️ Errors, warnings, and informational messages will be logged (e.g., watcher start/stop, paths added/removed). |
-| `LogLevelDebug` | 🐛 The most verbose level. Logs all messages, including detailed event processing steps (e.g., raw events, filtering, debouncing). |
+| `SeverityNone` | No messages will be logged. |
+| `SeverityError` | 🚨 Only critical errors will be logged (e.g., platform failures). |
+| `SeverityWarn` | ⚠️ Errors and warnings will be logged (e.g., event queue overflows). This is the default. |
+| `SeverityInfo` | ℹ️ Errors, warnings, and informational messages will be logged (e.g., watcher start/stop, paths added/removed). |
+| `SeverityDebug` | 🐛 The most verbose level. Logs all messages, including detailed event processing steps (e.g., raw events, filtering, debouncing). |
 
 
 ## FAQ
