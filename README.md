@@ -10,9 +10,9 @@ FSWatcher is a robust, concurrent, and cross-platform file system watcher for Go
 
 ## Table of contents
 
-- [Supported platforms](#supported-platforms)
-- [Feature comparison](#feature-comparison)
-- [Workflow diagram](#workflow-diagram)
+- [Supported platforms](#platforms)
+- [Feature comparison](#feature)
+- [Workflow diagram](#workflow)
 - [Project structure](#project-structure)
 - [Getting started](#getting-started)
 - [Configuration options](#configuration-options)
