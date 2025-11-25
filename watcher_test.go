@@ -73,7 +73,7 @@ func TestWatcher(t *testing.T) {
 			WithPath(tempDir),
 			WithCooldown(5*time.Millisecond),
 			WithReadyChannel(readyChan),
-			WithLogLevel(LogLevelNone),
+			WithLogSeverity(SeverityNone),
 		)
 		require.NoError(t, err)
 		require.NotNil(t, w)
@@ -417,6 +417,65 @@ func TestWatcher(t *testing.T) {
 
 		stats = w.Stats()
 		assert.Greater(t, stats.Uptime.Nanoseconds(), int64(0))
+
+		cancel()
+	})
+
+	t.Run("Paths", func(t *testing.T) {
+		// Setup a temporary directory structure
+		rootDir, _ := os.MkdirTemp("", "paths-root-*")
+		defer os.RemoveAll(rootDir)
+		dir1 := filepath.Join(rootDir, "dir1")
+		_ = os.Mkdir(dir1, 0755)
+		dir2 := filepath.Join(rootDir, "dir2")
+		_ = os.Mkdir(dir2, 0755)
+		dir3, _ := os.MkdirTemp("", "paths-abs-*")
+		defer os.RemoveAll(dir3)
+
+		// Change CWD to test relative paths
+		originalCwd, _ := os.Getwd()
+		require.NoError(t, os.Chdir(dir1))
+		defer func() { require.NoError(t, os.Chdir(originalCwd)) }()
+
+		// Get absolute paths for assertion
+		absDir1, _ := filepath.Abs(".")
+		absDir2, _ := filepath.Abs("../dir2")
+		absDir3, _ := filepath.Abs(dir3)
+
+		// Test initial paths
+		w, err := New(WithPath("."), WithPath("../dir2"))
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { _ = w.Watch(ctx) }()
+		time.Sleep(100 * time.Millisecond) // allow watcher to start
+		require.True(t, w.IsRunning())
+
+		expected := []string{absDir1, absDir2}
+		actual := w.Paths()
+		sort.Strings(expected)
+		sort.Strings(actual)
+		assert.Equal(t, expected, actual, "Initial paths should be correct and absolute")
+
+		// Test after adding a path
+		require.NoError(t, w.AddPath(dir3))
+		time.Sleep(100 * time.Millisecond)
+
+		expected = []string{absDir1, absDir2, absDir3}
+		actual = w.Paths()
+		sort.Strings(expected)
+		sort.Strings(actual)
+		assert.Equal(t, expected, actual, "Path list should be correct after adding a path")
+
+		// Test after dropping a path
+		require.NoError(t, w.DropPath("../dir2"))
+		time.Sleep(100 * time.Millisecond)
+
+		expected = []string{absDir1, absDir3}
+		actual = w.Paths()
+		sort.Strings(expected)
+		sort.Strings(actual)
+		assert.Equal(t, expected, actual, "Path list should be correct after dropping a path")
 
 		cancel()
 	})

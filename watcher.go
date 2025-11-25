@@ -67,7 +67,7 @@ type watcher struct {
 	cooldown          time.Duration
 	batchDuration     time.Duration
 	bufferSize        int
-	logLevel          LogLevel
+	severity          LogSeverity
 	ownsEventsChannel bool
 	incRegexPatterns  []string
 	excRegexPatterns  []string
@@ -121,6 +121,8 @@ type Watcher interface {
 	IsRunning() bool
 	// Stats returns the current watcher statistics
 	Stats() WatcherStats
+	// Paths returns a slice of the absolute paths currently being watched
+	Paths() []string
 	// Close gracefully shuts down the watcher
 	Close()
 }
@@ -133,7 +135,7 @@ func New(options ...WatcherOpt) (Watcher, error) {
 		cooldown:          DefaultCooldown,
 		bufferSize:        DefaultBufferSize,
 		ownsEventsChannel: true,
-		logLevel:          LogLevelWarn,
+		severity:          SeverityWarn,
 		watchedPaths:      make(map[string]*WatchPath),
 	}
 
@@ -153,7 +155,7 @@ func New(options ...WatcherOpt) (Watcher, error) {
 	if len(w.paths) == 0 {
 		cwd, err := os.Getwd()
 		if err != nil {
-			return nil, newError("resolve_default_path", "", err)
+			return nil, newError("resolveDefaultPath", "", err)
 		}
 		wp, err := validateWatchPath(cwd, WatchNested)
 		if err != nil {
@@ -184,14 +186,14 @@ func New(options ...WatcherOpt) (Watcher, error) {
 		var err error
 		includePatterns, err = compileRegex(w.incRegexPatterns)
 		if err != nil {
-			return nil, newError("compile_regex", "include", err)
+			return nil, newError("compileRegex", "include", err)
 		}
 	}
 	if len(w.excRegexPatterns) > 0 {
 		var err error
 		excludePatterns, err = compileRegex(w.excRegexPatterns)
 		if err != nil {
-			return nil, newError("compile_regex", "exclude", err)
+			return nil, newError("compileRegex", "exclude", err)
 		}
 	}
 
@@ -223,7 +225,7 @@ func (w *watcher) Watch(ctx context.Context) error {
 		return newError("config", "", err)
 	}
 
-	if w.logLevel <= LogLevelDebug {
+	if w.severity <= SeverityDebug {
 		w.logDebug("Watcher configuration:")
 		w.logDebug("  - Cooldown: %v", w.cooldown)
 		w.logDebug("  - BufferSize: %d", w.bufferSize)
@@ -307,9 +309,10 @@ func (w *watcher) Watch(ctx context.Context) error {
 // AddPath adds a new directory to watch at runtime
 func (w *watcher) AddPath(path string, options ...PathOption) error {
 	if !w.IsRunning() {
-		return newError("add_path", path, errors.New("watcher is not running"))
+		return newError("AddPath", path, errors.New("watcher is not running"))
 	}
 
+	// Create a temporary WatchPath to apply options
 	watchPath := &WatchPath{Path: path, Depth: WatchNested}
 	for _, opt := range options {
 		opt(watchPath)
@@ -327,7 +330,7 @@ func (w *watcher) AddPath(path string, options ...PathOption) error {
 	defer w.pathMu.Unlock()
 
 	if _, exists := w.watchedPaths[wp.Path]; exists {
-		return newError("add_path", wp.Path, errors.New("path is already being watched"))
+		return newError("AddPath", wp.Path, errors.New("path is already being watched"))
 	}
 
 	if err := w.addWatch(wp); err != nil {
@@ -342,35 +345,36 @@ func (w *watcher) AddPath(path string, options ...PathOption) error {
 // DropPath stops monitoring a path at runtime
 func (w *watcher) DropPath(path string) error {
 	if !w.IsRunning() {
-		return newError("remove_path", path, errors.New("watcher is not running"))
+		return newError("DropPath", path, errors.New("watcher is not running"))
 	}
 
-	cleanPath, err := filepath.Abs(path)
+	wp, err := validateWatchPath(path, WatchNested) // Depth doesn't matter for removal
 	if err != nil {
-		return newError("validate_path", path, fmt.Errorf("failed to get absolute path: %w", err))
+		return err
 	}
 
 	w.pathMu.Lock()
 	defer w.pathMu.Unlock()
 
-	if _, exists := w.watchedPaths[cleanPath]; !exists {
-		return newError("remove_path", cleanPath, errors.New("path is not being watched"))
+	if _, exists := w.watchedPaths[wp.Path]; !exists {
+		return newError("DropPath", path, errors.New("path is not being watched"))
 	}
 
-	if err := w.removeWatch(cleanPath); err != nil {
-		w.logError("Platform backend failed to remove watch for %s: %v", cleanPath, err)
+	if err := w.removeWatch(wp.Path); err != nil {
+		w.logError("Platform backend failed to remove watch for %s: %v", wp.Path, err)
+		// still attempt to remove from our state
 	}
 
 	// Remove the path from our internal state
-	delete(w.watchedPaths, cleanPath)
-	w.logInfo("Successfully removed watch path: %s", cleanPath)
+	delete(w.watchedPaths, wp.Path)
+	w.logInfo("Successfully removed watch path: %s", wp.Path)
 	return nil
 }
 
 // Events returns the event channel.
 func (w *watcher) Events() <-chan WatchEvent {
 	// If logging is not verbose enough to show individual events, return the original channel directly.
-	if w.logLevel < LogLevelInfo {
+	if w.severity < SeverityInfo {
 		return w.events
 	}
 
@@ -421,10 +425,22 @@ func (w *watcher) Stats() WatcherStats {
 	return stats
 }
 
+// Paths returns a slice of the absolute paths currently being watched
+func (w *watcher) Paths() []string {
+	w.pathMu.RLock()
+	defer w.pathMu.RUnlock()
+
+	paths := make([]string, 0, len(w.watchedPaths))
+	for path := range w.watchedPaths {
+		paths = append(paths, path)
+	}
+	return paths
+}
+
 // Close gracefully shuts down the watcher
 func (w *watcher) Close() {
 	if w.isShuttingDown.CompareAndSwap(false, true) {
-		w.log(LogLevelInfo, "Close called, initiating shutdown...")
+		w.log(SeverityInfo, "Close called, initiating shutdown...")
 		close(w.done)
 	}
 }
@@ -456,11 +472,11 @@ func (w *watcher) sendToChannel(event WatchEvent) {
 		select {
 		case w.dropped <- event:
 			atomic.AddInt64(&w.stats.eventsDropped, 1)
-			w.log(LogLevelWarn, "Event channel full, event sent to dropped channel: %s", event.String())
+			w.log(SeverityWarn, "Event channel full, event sent to dropped channel: %s", event.String())
 		default:
 			// Both channels are full, the event is lost
 			atomic.AddInt64(&w.stats.eventsLost, 1)
-			w.log(LogLevelWarn, "Event and dropped channels full, event lost: %s", event.String())
+			w.log(SeverityWarn, "Event and dropped channels full, event lost: %s", event.String())
 		}
 	}
 }
@@ -476,7 +492,7 @@ func (w *watcher) runCleanup(ctx context.Context) {
 		case <-ticker.C:
 			cleaned := w.debouncer.Cleanup(CleanupAge)
 			if cleaned > 0 {
-				w.log(LogLevelDebug, "Cleaned up %d stale entries from debouncer cache", cleaned)
+				w.log(SeverityDebug, "Cleaned up %d stale entries from debouncer cache", cleaned)
 			}
 		case <-ctx.Done():
 			return
@@ -509,7 +525,7 @@ func (w *watcher) handlePlatformEvent(event WatchEvent) {
 		eventDir := filepath.Dir(event.Path)
 		// If the event's directory is not the same as the watched path, it's a subdirectory event so will be ignored
 		if filepath.Clean(eventDir) != filepath.Clean(parentWatch.Path) {
-			w.log(LogLevelDebug, "Filtered by depth: %s", event.Path)
+			w.log(SeverityDebug, "Filtered by depth: %s", event.Path)
 			atomic.AddInt64(&w.stats.eventsFiltered, 1)
 			return
 		}
@@ -519,14 +535,14 @@ func (w *watcher) handlePlatformEvent(event WatchEvent) {
 
 	// Filter system files
 	if isSystemFile(event.Path) {
-		w.log(LogLevelDebug, "Filtered system file: %s", event.Path)
+		w.log(SeverityDebug, "Filtered system file: %s", event.Path)
 		atomic.AddInt64(&w.stats.eventsFiltered, 1)
 		return
 	}
 
 	// Filter patterns
 	if !w.filter.ShouldInclude(event.Path) {
-		w.log(LogLevelDebug, "Filtered by pattern: %s", event.Path)
+		w.log(SeverityDebug, "Filtered by pattern: %s", event.Path)
 		atomic.AddInt64(&w.stats.eventsFiltered, 1)
 		return
 	}
@@ -534,16 +550,16 @@ func (w *watcher) handlePlatformEvent(event WatchEvent) {
 	// Debounce
 	merged, ok := w.debouncer.ShouldProcess(event)
 	if !ok {
-		w.log(LogLevelDebug, "Merged by debouncer: %s → %v", merged.Path, merged.Types)
+		w.log(SeverityDebug, "Merged by debouncer: %s → %v", merged.Path, merged.Types)
 		return
 	}
 
 	// Dispatch
 	if w.batcher != nil {
-		w.log(LogLevelDebug, "Dispatching event to batcher: %s", merged.String())
+		w.log(SeverityDebug, "Dispatching event to batcher: %s", merged.String())
 		w.batcher.addEvent(merged)
 	} else {
-		w.log(LogLevelDebug, "Dispatching event directly: %s", merged.String())
+		w.log(SeverityDebug, "Dispatching event directly: %s", merged.String())
 		w.sendToChannel(merged)
 	}
 }
