@@ -68,7 +68,7 @@ type watchedPath struct {
 func (w *watcher) startPlatform(ctx context.Context) (<-chan struct{}, error) {
 	iocp, err := windows.CreateIoCompletionPort(windows.InvalidHandle, 0, 0, 0)
 	if err != nil {
-		return nil, newError("create_iocp", "", err)
+		return nil, newError("createIoCp", "", err)
 	}
 
 	w.streams = make(map[string]any)
@@ -195,7 +195,7 @@ func (w *watcher) addWatch(watchPath *WatchPath) error {
 
 	utf16Path, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return newError("convert_path", path, err)
+		return newError("convertPath", path, err)
 	}
 	handle, err := windows.CreateFile(
 		utf16Path,
@@ -207,7 +207,7 @@ func (w *watcher) addWatch(watchPath *WatchPath) error {
 		0,
 	)
 	if err != nil {
-		return newError("create_handle", path, err)
+		return newError("createHandle", path, err)
 	}
 
 	wp := &watchedPath{
@@ -219,12 +219,12 @@ func (w *watcher) addWatch(watchPath *WatchPath) error {
 
 	if _, err := windows.CreateIoCompletionPort(handle, iocp, key, 0); err != nil {
 		windows.Close(handle)
-		return newError("associate_iocp", path, err)
+		return newError("associateIoCp", path, err)
 	}
 
 	if err := w.readChanges(wp); err != nil {
 		windows.Close(handle)
-		return newError("initial_read", path, err)
+		return newError("initialRead", path, err)
 	}
 
 	w.streams[path] = wp

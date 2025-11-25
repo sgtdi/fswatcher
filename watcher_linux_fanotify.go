@@ -114,7 +114,7 @@ func (p *fanotify) addWatch(_ *watcher, watchPath *WatchPath) error {
 
 	flags := uint(unix.FAN_MARK_ADD | unix.FAN_MARK_ONLYDIR)
 	if err := unix.FanotifyMark(p.fd, flags, mask, unix.AT_FDCWD, path); err != nil {
-		return newError("create_mark_fa", path, err)
+		return newError("createMarkFa", path, err)
 	}
 
 	p.mu.Lock()
@@ -125,7 +125,7 @@ func (p *fanotify) addWatch(_ *watcher, watchPath *WatchPath) error {
 
 func (p *fanotify) removeWatch(path string) error {
 	if err := unix.FanotifyMark(p.fd, uint(unix.FAN_MARK_REMOVE|unix.FAN_MARK_ONLYDIR), ^uint64(0), unix.AT_FDCWD, path); err != nil {
-		return newError("remove_watch", path, err)
+		return newError("removeWatch", path, err)
 	}
 	p.mu.Lock()
 	delete(p.paths, path)

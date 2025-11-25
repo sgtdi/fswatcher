@@ -11,7 +11,7 @@ import (
 
 // TestNewError tests the newError function
 func TestNewError(t *testing.T) {
-	op := "test_op"
+	op := "testOp"
 	path := "/test/path"
 	err := errors.New("test_err")
 	watcherErr := newError(op, path, err)
@@ -28,7 +28,7 @@ func TestWatcherError_Error(t *testing.T) {
 
 	t.Run("With Path", func(t *testing.T) {
 		// Arrange
-		op := "read_dir"
+		op := "readDir"
 		path := "/tmp/some/path"
 		watcherErr := newError(op, path, baseErr)
 		expectedString := fmt.Sprintf("watcher %s %s: %v", op, path, baseErr)
@@ -37,7 +37,7 @@ func TestWatcherError_Error(t *testing.T) {
 	})
 
 	t.Run("Without Path", func(t *testing.T) {
-		op := "start_stream"
+		op := "startStream"
 		watcherErr := newError(op, "", baseErr)
 		expectedString := fmt.Sprintf("watcher %s: %v", op, baseErr)
 		actualString := watcherErr.Error()

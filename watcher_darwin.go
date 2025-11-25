@@ -306,7 +306,7 @@ func (w *watcher) addWatch(watchPath *WatchPath) error {
 	latency := C.double(streamLatency)
 
 	cDebug := C.int(0)
-	if w.logLevel >= LogLevelDebug {
+	if w.severity >= SeverityDebug {
 		cDebug = 1
 	}
 
@@ -319,7 +319,7 @@ func (w *watcher) addWatch(watchPath *WatchPath) error {
 	if C.FSEventStreamStart(streamRef) == 0 {
 		C.FSEventStreamInvalidate(streamRef)
 		C.FSEventStreamRelease(streamRef)
-		return newError("start_stream", path, errors.New("failed to start FSEvents stream"))
+		return newError("startStream", path, errors.New("failed to start FSEvents stream"))
 	}
 
 	w.streams[path] = streamRef

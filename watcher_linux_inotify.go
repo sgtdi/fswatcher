@@ -115,17 +115,17 @@ func newInotify() (*inotify, error) {
 func setupEpoll(inotifyFD, eventFD int) (int, error) {
 	epfd, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
 	if err != nil {
-		return -1, fmt.Errorf("epoll_create error: %w", err)
+		return -1, fmt.Errorf("setupEpoll error: %w", err)
 	}
 
 	if err := unix.EpollCtl(epfd, unix.EPOLL_CTL_ADD, inotifyFD, &unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(inotifyFD)}); err != nil {
 		unix.Close(epfd)
-		return -1, fmt.Errorf("epoll_ctl add inotify error: %w", err)
+		return -1, fmt.Errorf("epollCtl add inotify error: %w", err)
 	}
 
 	if err := unix.EpollCtl(epfd, unix.EPOLL_CTL_ADD, eventFD, &unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(eventFD)}); err != nil {
 		unix.Close(epfd)
-		return -1, fmt.Errorf("epoll_ctl add eventfd error: %w", err)
+		return -1, fmt.Errorf("epollCtl add eventfd error: %w", err)
 	}
 
 	return epfd, nil
@@ -183,7 +183,7 @@ func (w *watcher) runInotifyLoop(ctx context.Context, p *inotify, done chan stru
 			if err == unix.EINTR {
 				continue
 			}
-			w.logError("inotify epoll_wait error: %v", err)
+			w.logError("inotify epollWait error: %v", err)
 			return
 		}
 
@@ -350,7 +350,7 @@ func (p *inotify) addWatch(w *watcher, watchPath *WatchPath) error {
 
 	wd, err := unix.InotifyAddWatch(p.fd, path, inotifyMask())
 	if err != nil {
-		return newError("create_watch", path, err)
+		return newError("createWatch", path, err)
 	}
 	p.mu.Lock()
 	p.wds[wd] = watchPath
@@ -392,7 +392,7 @@ func (p *inotify) removeWatch(path string) error {
 	node := p.trie.findNode(path)
 	if node == nil {
 		p.mu.RUnlock()
-		return newError("remove_watch", path, errors.New("watch not found for path"))
+		return newError("removeWatch", path, errors.New("watch not found for path"))
 	}
 
 	// Hold the read lock during the entire traversal
@@ -401,7 +401,7 @@ func (p *inotify) removeWatch(path string) error {
 
 	if len(wdsToRemove) == 0 {
 		// Node exists but has no associated watch descriptor
-		return newError("remove_watch", path, errors.New("watch not found for path"))
+		return newError("removeWatch", path, errors.New("watch not found for path"))
 	}
 
 	for _, wd := range wdsToRemove {
