@@ -86,8 +86,8 @@ func WithLogFile(path string) WatcherOpt {
 	}
 }
 
-// WithLogSeverity sets the logging verbosity (default is SeverityWarn)
-func WithLogSeverity(level LogSeverity) WatcherOpt {
+// WithSeverity sets the logging verbosity (default is SeverityWarn)
+func WithSeverity(level Severity) WatcherOpt {
 	return func(w *watcher) {
 		w.severity = level
 	}

@@ -87,10 +87,10 @@ func TestWatcherOptions(t *testing.T) {
 		assert.Equal(t, readyChan, w.readyChan)
 	})
 
-	t.Run("WithLogSeverity", func(t *testing.T) {
+	t.Run("WithSeverity", func(t *testing.T) {
 		w := &watcher{}
 		expectedLevel := SeverityError
-		opt := WithLogSeverity(expectedLevel)
+		opt := WithSeverity(expectedLevel)
 
 		opt(w)
 

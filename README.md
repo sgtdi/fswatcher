@@ -134,7 +134,7 @@ func main() {
 	// Create a new fswatcher instance with options
 	fsw, err := fswatcher.New(
 		fswatcher.WithPath("./"),
-		fswatcher.WithLogSeverity(fswatcher.SeverityDebug),
+		fswatcher.WithSeverity(fswatcher.SeverityDebug),
 	)
 	if err != nil {
 		log.Fatalf("Failed to create watcher: %v", err)
@@ -175,7 +175,7 @@ Customize the watcher's behavior using functional options passed to `fswatcher.N
 | `WithIncRegex(patterns...)` | Sets a slice of regex patterns for paths to include. If a path matches any of these patterns, it will be processed. If this option is not used, all non-excluded paths are processed by default. | (none) |
 | `WithExcRegex(patterns...)` | Sets a slice of regex patterns for paths to exclude. If a path matches any of these patterns, it will be ignored. Exclusions always take precedence over inclusions. | (none) |
 | `WithEventBatching(d)`      | Enables and configures event batching. Multiple events for the same path within the duration are merged. | (disabled) |
-| `WithLogSeverity(level)`    | Sets the logging verbosity (`SeverityDebug`, `SeverityInfo`, `SeverityWarn`, `SeverityError`). | `SeverityWarn` |
+| `WithSeverity(level)`       | Sets the logging verbosity (`SeverityDebug`, `SeverityInfo`, `SeverityWarn`, `SeverityError`). | `SeverityWarn` |
 | `WithLogFile(path)`         | Sets a file for logging. Use `"stdout"` to log to the console or `""` to disable. | (disabled) |
 | `WithLinuxPlatform(p)`      | Sets a specific backend (`PlatformInotify` or `PlatformFanotify`) on Linux. | `PlatformInotify` |
 | `WithDepth(depth)`          | Sets the watch depth for a specific path (`WatchNested` or `WatchTopLevel`). This option is passed to `WithPath`. | `WatchNested` |

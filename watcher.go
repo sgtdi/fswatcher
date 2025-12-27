@@ -67,7 +67,7 @@ type watcher struct {
 	cooldown          time.Duration
 	batchDuration     time.Duration
 	bufferSize        int
-	severity          LogSeverity
+	severity          Severity
 	ownsEventsChannel bool
 	incRegexPatterns  []string
 	excRegexPatterns  []string

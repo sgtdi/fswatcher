@@ -7,20 +7,20 @@ import (
 	"time"
 )
 
-// LogSeverity defines the logging verbosity
-type LogSeverity int
+// Severity defines the logging verbosity
+type Severity int
 
 // Logging levels
 const (
-	SeverityNone LogSeverity = iota
+	SeverityNone Severity = iota
 	SeverityError
 	SeverityWarn
 	SeverityInfo
 	SeverityDebug
 )
 
-// String returns the string representation of a LogSeverity
-func (l LogSeverity) String() string {
+// String returns the string representation of a Severity
+func (l Severity) String() string {
 	switch l {
 	case SeverityError:
 		return "ERROR"
@@ -35,8 +35,8 @@ func (l LogSeverity) String() string {
 	}
 }
 
-// Emoji returns a simple emoji for a LogSeverity
-func (l LogSeverity) Emoji() string {
+// Emoji returns a simple emoji for a Severity
+func (l Severity) Emoji() string {
 	switch l {
 	case SeverityError:
 		return "🚨"
@@ -52,7 +52,7 @@ func (l LogSeverity) Emoji() string {
 }
 
 // log handles leveled logging
-func (w *watcher) log(level LogSeverity, format string, args ...any) {
+func (w *watcher) log(level Severity, format string, args ...any) {
 	if level > w.severity {
 		return
 	}

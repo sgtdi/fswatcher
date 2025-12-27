@@ -73,7 +73,7 @@ func TestWatcher(t *testing.T) {
 			WithPath(tempDir),
 			WithCooldown(5*time.Millisecond),
 			WithReadyChannel(readyChan),
-			WithLogSeverity(SeverityNone),
+			WithSeverity(SeverityNone),
 		)
 		require.NoError(t, err)
 		require.NotNil(t, w)

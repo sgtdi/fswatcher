@@ -14,17 +14,17 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestLogSeverity_String tests LogSeverity string
-func TestLogSeverity_String(t *testing.T) {
+// TestSeverity_String tests Severity string
+func TestSeverity_String(t *testing.T) {
 	testCases := []struct {
-		level    LogSeverity
+		level    Severity
 		expected string
 	}{
 		{SeverityError, "ERROR"},
 		{SeverityWarn, "WARN"},
 		{SeverityInfo, "INFO"},
 		{SeverityDebug, "DEBUG"},
-		{LogSeverity(99), "UNKNOWN"}, // Edge case
+		{Severity(99), "UNKNOWN"}, // Edge case
 	}
 
 	for _, tc := range testCases {
