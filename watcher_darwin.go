@@ -17,6 +17,12 @@ extern void goHandleFSEvent(
     FSEventStreamEventId* ids
 );
 
+// Callback to log stream creation
+extern void goLogStreamSuccess(
+    uintptr_t handle,
+    char* path
+);
+
 // Forwards event data to the Go handler
 static void fsEventCallback(
     ConstFSEventStreamRef streamRef,
@@ -87,7 +93,7 @@ static FSEventStreamRef createAndScheduleStream(
     FSEventStreamSetDispatchQueue(stream, queue);
     dispatch_release(queue); // The stream retains the queue
 
-    if (debug) fprintf(stdout, "fswatcher: C DEBUG - FSEventStream created successfully for path: %s\n", path);
+    if (debug) goLogStreamSuccess(handle, (char*)path);
     return stream;
 }
 */
@@ -250,6 +256,19 @@ func goHandleFSEvent(handle C.uintptr_t, numEvents C.size_t, cPaths **C.char, cF
 
 		w.handlePlatformEvent(event)
 	}
+}
+
+// goLogStreamSuccess logs successful stream creation
+//
+//export goLogStreamSuccess
+func goLogStreamSuccess(handle C.uintptr_t, cPath *C.char) {
+	watcherPtr, ok := watcherMap.Load(uintptr(handle))
+	if !ok {
+		return
+	}
+	w := watcherPtr.(*watcher)
+	path := C.GoString(cPath)
+	w.logDebug("C DEBUG - FSEventStream created successfully for path: %s", path)
 }
 
 // startPlatform initializes the FSEvents backend for macOS
