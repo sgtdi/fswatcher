@@ -98,11 +98,11 @@ The watcher operates in a clear, multi-stage pipeline that processes events conc
 
 | Stage | Description |
 | :--- | :--- |
-| **1. OS Native API** | The OS (`FSEvents`, `inotify`, `ReadDirectoryChangesW`) captures a raw file system event (e.g., a file was written to). |
-| **2. Filtering** | The event's path is checked against system file rules and user-defined regex patterns (`WithPath`, `WithIncRegex`, `WithExcRegex`). If it's a match for exclusion, it's dropped. |
-| **3. Debouncing** | The event is held for a configurable cooldown period (`WithCooldown`). If another event for the same path arrives during this time, the two events are merged into one. |
-| **4. Batching** | If enabled (`WithEventBatching`), the debounced event is held in a batch. The batch is released as a single `WatchEvent` after a configurable duration. |
-| **5. User Channel** | The final, clean `WatchEvent` is sent to the `Events()` channel for your application to consume. |
+| **OS API** | The OS (`FSEvents`, `inotify`, `ReadDirectoryChangesW`) captures a raw file system event (e.g., a file was written to). |
+| **Filtering** | The event's path is checked against system file rules and user-defined regex patterns (`WithPath`, `WithIncRegex`, `WithExcRegex`). If it's a match for exclusion, it's dropped. |
+| **Debouncing** | The event is held for a configurable cooldown period (`WithCooldown`). If another event for the same path arrives during this time, the two events are merged into one. |
+| **Batching** | If enabled (`WithEventBatching`), the debounced event is held in a batch. The batch is released as a single `WatchEvent` after a configurable duration. |
+| **User channel** | The final, clean `WatchEvent` is sent to the `Events()` channel for your application to consume. |
 
 This entire process ensures that your application receives high-quality, actionable events without the noise typically associated with raw file system notifications.
 
