@@ -30,20 +30,20 @@ FSWatcher uses native OS APIs for efficient, low-overhead monitoring with near-z
 
 | Platform | Native System API Used | Status |
 | :--- | :--- | :--- |
-| ✅ **macOS** | `FSEvents` framework | Fully supported |
-| ✅ **Linux** | `inotify` | Fully supported |
+| **macOS** | `FSEvents` framework | Fully supported |
+| **Linux** | `inotify` | Fully supported |
 | | `fanotify` | Partial support (planned for future enhancements) |
-| ✅ **Windows** | `ReadDirectoryChangesW` | Fully supported |
+| **Windows** | `ReadDirectoryChangesW` | Fully supported |
 
 ## Why FSWatcher
 
 Most Go file watchers give you raw OS events—which means duplicate events, noise from system files, and no event batching. FSWatcher solves this:
 
-- ✅ **Built-in debouncing** - Merge rapid-fire events automatically
-- ✅ **Event batching** - Group related changes into single events  
-- ✅ **Smart filtering** - Regex patterns + automatic system file exclusion (`.git`, `.DS_Store`, etc.)
-- ✅ **Zero dependencies** - Just standard library + native OS APIs
-- ✅ **Context-based** - Modern Go patterns with graceful shutdown
+- **Built-in debouncing** - Merge rapid-fire events automatically
+- **Event batching** - Group related changes into single events  
+- **Smart filtering** - Regex patterns + automatic system file exclusion (`.git`, `.DS_Store`, etc.)
+- **Zero dependencies** - Just standard library + native OS APIs
+- **Context-based** - Modern Go patterns with graceful shutdown
 
 
 ## Quick Start
