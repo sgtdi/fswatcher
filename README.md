@@ -6,15 +6,20 @@
 
 # FSWatcher
 
+**A production-ready file watcher for Go with built-in debouncing, batching, and filtering.**
+
 FSWatcher is a robust, concurrent, and cross-platform file system watcher for Go. It provides a simple and powerful API to monitor directories for file system changes, designed for high-performance applications and development tools. The goal is to abstract away the complexities of platform-specific APIs, offering a unified, easy-to-use, and dependency-free interface.
 
 ## Table of contents
 
 - [Supported platforms](#platforms)
+- [Why FSWatcher](#why-fswatcher)
+- [Quick start](#quick-start)
 - [Feature comparison](#feature)
+- [What makes it different](#what-makes-it-different)
 - [Workflow diagram](#workflow)
 - [Project structure](#project-structure)
-- [Getting started](#getting-started)
+- [Advanced usage](#advanced-usage)
 - [Configuration options](#configuration-options)
 - [Watcher methods](#watcher-methods)
 - [Logging](#logging)
@@ -30,6 +35,63 @@ FSWatcher uses native OS APIs for efficient, low-overhead monitoring with near-z
 | ✅ **Linux** | `inotify` | Fully supported |
 | | `fanotify` | Partial support (planned for future enhancements) |
 | ✅ **Windows** | `ReadDirectoryChangesW` | Fully supported |
+
+## Why FSWatcher
+
+Most Go file watchers give you raw OS events—which means duplicate events, noise from system files, and no event batching. FSWatcher solves this:
+
+- ✅ **Built-in debouncing** - Merge rapid-fire events automatically
+- ✅ **Event batching** - Group related changes into single events  
+- ✅ **Smart filtering** - Regex patterns + automatic system file exclusion (`.git`, `.DS_Store`, etc.)
+- ✅ **Zero dependencies** - Just standard library + native OS APIs
+- ✅ **Context-based** - Modern Go patterns with graceful shutdown
+
+
+## Quick Start
+
+To add FSWatcher to your project, use `go get`:
+
+```sh
+go get github.com/sgtdi/fswatcher
+```
+
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "github.com/sgtdi/fswatcher"
+)
+
+func main() {
+    // Create watcher with debouncing
+    w, _ := fswatcher.New(
+        fswatcher.WithPath("./src"),
+        fswatcher.WithCooldown(200*time.Millisecond),
+    )
+
+    ctx := context.Background()
+    go w.Watch(ctx)
+
+    // Process clean, debounced events
+    for event := range w.Events() {
+        fmt.Printf("File changed: %s (%s)\n", event.Path, event.Op)
+    }
+}
+```
+
+## What makes it different
+
+| Feature | FSWatcher | fsnotify / notify |
+|---------|-----------|-------------------|
+| Debouncing | Built-in, configurable | Manual implementation |
+| Event batching | Built-in | Manual implementation |
+| Path filtering | Regex include/exclude | Manual implementation |
+| System files | Auto-ignored | Manual filtering |
+| API style | Functional options | Imperative |
+| Duplicate events | Handled automatically | Manual deduplication |
 
 ## Features
 
@@ -81,40 +143,7 @@ The project is designed to be lightweight and easy to understand, with a clear s
     └── main.go                # Example usage
 ```
 
-## Getting started
-
-### Installation
-
-To add FSWatcher to your project, use `go get`:
-
-```sh
-go get github.com/sgtdi/fswatcher
-```
-
-### Example
-
-Here is a minimal example that monitors the current directory until the program is interrupted (e.g., with `Ctrl+C`).
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-
-	"github.com/sgtdi/fswatcher"
-)
-
-func main() {
-	fsw, _ := fswatcher.New()
-	ctx, _ := context.WithCancel(context.Background())
-	go fsw.Watch(ctx)
-	// Watch for events
-	for e := range fsw.Events() {
-	    fmt.Println(e.String())
-	}
-}
-```
+## Advanced usage
 
 This more advanced example shows how to configure the watcher with a specific path and log level, run it in a goroutine, and handle events in a `select` loop.
 
