@@ -16,12 +16,12 @@ FSWatcher is a robust, concurrent, and cross-platform file system watcher for Go
 - [Why FSWatcher](#why-fswatcher)
 - [Quick start](#quick-start)
 - [What makes it different](#what-makes-it-different)
+- [Options](#options)
+- [Methods](#methods)
+- [Logging](#logging)
 - [Workflow diagram](#workflow)
 - [Project structure](#project-structure)
 - [Advanced usage](#advanced-usage)
-- [Configuration options](#configuration-options)
-- [Watcher methods](#watcher-methods)
-- [Logging](#logging)
 - [FAQ](#faq)
 
 ## Platforms
@@ -91,6 +91,54 @@ func main() {
 | System files | Auto-ignored | Manual filtering |
 | API style | Functional options | Imperative |
 | Duplicate events | Handled automatically | Manual deduplication |
+
+## Options
+
+Customize the watcher's behavior using functional options passed to `fswatcher.New()`.
+
+| Option                      | Description | Default |
+|:----------------------------| :--- | :--- |
+| `WithPath(path, ...)`       | Adds an initial directory to watch. Must be a valid directory path. Can be called multiple times to watch multiple directories. Takes optional `PathOption` values, such as `WithDepth(WatchTopLevel)` to disable recursive watching for that specific path. | Current directory |
+| `WithCooldown(d)`           | Sets the debouncing cooldown period. Events for the same path arriving within this duration will be merged. | `100ms` |
+| `WithBufferSize(size)`      | Sets the size of the main event channel. | `4096` |
+| `WithIncRegex(patterns...)` | Sets a slice of regex patterns for paths to include. If a path matches any of these patterns, it will be processed. If this option is not used, all non-excluded paths are processed by default. | (none) |
+| `WithExcRegex(patterns...)` | Sets a slice of regex patterns for paths to exclude. If a path matches any of these patterns, it will be ignored. Exclusions always take precedence over inclusions. | (none) |
+| `WithEventBatching(d)`      | Enables and configures event batching. Multiple events for the same path within the duration are merged. | (disabled) |
+| `WithSeverity(level)`       | Sets the logging verbosity (`SeverityDebug`, `SeverityInfo`, `SeverityWarn`, `SeverityError`). | `SeverityWarn` |
+| `WithLogFile(path)`         | Sets a file for logging. Use `"stdout"` to log to the console or `""` to disable. | (disabled) |
+| `WithLinuxPlatform(p)`      | Sets a specific backend (`PlatformInotify` or `PlatformFanotify`) on Linux. | `PlatformInotify` |
+| `WithDepth(depth)`          | Sets the watch depth for a specific path (`WatchNested` or `WatchTopLevel`). This option is passed to `WithPath`. | `WatchNested` |
+
+## Methods
+
+Once you have a `Watcher` instance from `New()`, you can use the following methods to control it:
+
+| Method | Description |
+| :--- | :--- |
+| `Watch(ctx)` | Starts the watcher. This is a **blocking** call that runs until the provided `context.Context` is canceled. It should almost always be run in a separate goroutine. |
+| `Events()` | Returns a read-only channel (`<-chan WatchEvent`) where you receive file system events. You should range over this channel in a goroutine to process events. |
+| `AddPath(path)` | Adds a new directory path for the watcher to monitor at runtime. |
+| `DropPath(path)` | Stops monitoring a directory path at runtime. |
+| `Close()` | Initiates a graceful shutdown of the watcher. This is an alternative to canceling the context passed to `Watch()`. |
+| `IsRunning()` | Returns `true` if the watcher's `Watch()` method is currently running. |
+| `Stats()` | Returns a `WatcherStats` struct containing runtime statistics like uptime and the number of events processed. |
+| `Dropped()` | Returns a read-only channel that receives events that were dropped because the main `Events()` channel was full. |
+
+## Logging
+
+FSWatcher includes a built-in structured logger to help with debugging and monitoring. You can control the verbosity and output destination using `WatcherOpt` functions.
+
+### Log Severity
+
+The log severity determines the minimum severity of messages that will be logged. The available levels are:
+
+| Level | Description |
+| :--- | :--- |
+| `SeverityNone` | No messages will be logged. |
+| `SeverityError` | 🚨 Only critical errors will be logged (e.g., platform failures). |
+| `SeverityWarn` | ⚠️ Errors and warnings will be logged (e.g., event queue overflows). This is the default. |
+| `SeverityInfo` | ℹ️ Errors, warnings, and informational messages will be logged (e.g., watcher start/stop, paths added/removed). |
+| `SeverityDebug` | 🐛 The most verbose level. Logs all messages, including detailed event processing steps (e.g., raw events, filtering, debouncing). |
 
 ## Workflow
 
@@ -177,55 +225,6 @@ func main() {
 	}
 }
 ```
-
-## Configuration options
-
-Customize the watcher's behavior using functional options passed to `fswatcher.New()`.
-
-| Option                      | Description | Default |
-|:----------------------------| :--- | :--- |
-| `WithPath(path, ...)`       | Adds an initial directory to watch. Must be a valid directory path. Can be called multiple times to watch multiple directories. Takes optional `PathOption` values, such as `WithDepth(WatchTopLevel)` to disable recursive watching for that specific path. | Current directory |
-| `WithCooldown(d)`           | Sets the debouncing cooldown period. Events for the same path arriving within this duration will be merged. | `100ms` |
-| `WithBufferSize(size)`      | Sets the size of the main event channel. | `4096` |
-| `WithIncRegex(patterns...)` | Sets a slice of regex patterns for paths to include. If a path matches any of these patterns, it will be processed. If this option is not used, all non-excluded paths are processed by default. | (none) |
-| `WithExcRegex(patterns...)` | Sets a slice of regex patterns for paths to exclude. If a path matches any of these patterns, it will be ignored. Exclusions always take precedence over inclusions. | (none) |
-| `WithEventBatching(d)`      | Enables and configures event batching. Multiple events for the same path within the duration are merged. | (disabled) |
-| `WithSeverity(level)`       | Sets the logging verbosity (`SeverityDebug`, `SeverityInfo`, `SeverityWarn`, `SeverityError`). | `SeverityWarn` |
-| `WithLogFile(path)`         | Sets a file for logging. Use `"stdout"` to log to the console or `""` to disable. | (disabled) |
-| `WithLinuxPlatform(p)`      | Sets a specific backend (`PlatformInotify` or `PlatformFanotify`) on Linux. | `PlatformInotify` |
-| `WithDepth(depth)`          | Sets the watch depth for a specific path (`WatchNested` or `WatchTopLevel`). This option is passed to `WithPath`. | `WatchNested` |
-
-## Watcher methods
-
-Once you have a `Watcher` instance from `New()`, you can use the following methods to control it:
-
-| Method | Description |
-| :--- | :--- |
-| `Watch(ctx)` | Starts the watcher. This is a **blocking** call that runs until the provided `context.Context` is canceled. It should almost always be run in a separate goroutine. |
-| `Events()` | Returns a read-only channel (`<-chan WatchEvent`) where you receive file system events. You should range over this channel in a goroutine to process events. |
-| `AddPath(path)` | Adds a new directory path for the watcher to monitor at runtime. |
-| `DropPath(path)` | Stops monitoring a directory path at runtime. |
-| `Close()` | Initiates a graceful shutdown of the watcher. This is an alternative to canceling the context passed to `Watch()`. |
-| `IsRunning()` | Returns `true` if the watcher's `Watch()` method is currently running. |
-| `Stats()` | Returns a `WatcherStats` struct containing runtime statistics like uptime and the number of events processed. |
-| `Dropped()` | Returns a read-only channel that receives events that were dropped because the main `Events()` channel was full. |
-
-## Logging
-
-FSWatcher includes a built-in structured logger to help with debugging and monitoring. You can control the verbosity and output destination using `WatcherOpt` functions.
-
-### Log Severity
-
-The log severity determines the minimum severity of messages that will be logged. The available levels are:
-
-| Level | Description |
-| :--- | :--- |
-| `SeverityNone` | No messages will be logged. |
-| `SeverityError` | 🚨 Only critical errors will be logged (e.g., platform failures). |
-| `SeverityWarn` | ⚠️ Errors and warnings will be logged (e.g., event queue overflows). This is the default. |
-| `SeverityInfo` | ℹ️ Errors, warnings, and informational messages will be logged (e.g., watcher start/stop, paths added/removed). |
-| `SeverityDebug` | 🐛 The most verbose level. Logs all messages, including detailed event processing steps (e.g., raw events, filtering, debouncing). |
-
 
 ## FAQ
 
