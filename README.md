@@ -15,7 +15,6 @@ FSWatcher is a robust, concurrent, and cross-platform file system watcher for Go
 - [Supported platforms](#platforms)
 - [Why FSWatcher](#why-fswatcher)
 - [Quick start](#quick-start)
-- [Feature comparison](#feature)
 - [What makes it different](#what-makes-it-different)
 - [Workflow diagram](#workflow)
 - [Project structure](#project-structure)
@@ -92,19 +91,6 @@ func main() {
 | System files | Auto-ignored | Manual filtering |
 | API style | Functional options | Imperative |
 | Duplicate events | Handled automatically | Manual deduplication |
-
-## Features
-
-This library was created to address common challenges found in other file system watchers, such as event batching, debouncing, and simplified configuration.
-
-| Feature | FSWatcher | Similar projects |
-| :--- | :--- | :--- |
-| **Event debouncing** | ✅ Built-in (configurable cooldown) | ❌ Manual implementation required |
-| **Event batching** | ✅ Built-in (configurable duration) | ❌ Manual implementation required |
-| **Filtering** | ✅ Regex patterns (inc/exc) | ❌ Manual implementation required (often no built-in filtering) |
-| **API style** | Functional options, context-managed | Typically imperative, channel-based |
-| **System file ignore**| ✅ Automatic (e.g., `.git`, `.DS_Store`) | ❌ Manual implementation required |
-| **Logging** | ✅ Built-in structured logging | ❌ Manual implementation required |
 
 ## Workflow
 
