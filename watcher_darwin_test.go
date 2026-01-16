@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestWatcher_Darwin tests the Darwin backend initialization
 func TestWatcher_Darwin(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "TestWatcher_Darwin*")
 	require.NoError(t, err)
