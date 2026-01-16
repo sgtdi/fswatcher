@@ -64,7 +64,7 @@ func TestKqueue_Backend(t *testing.T) {
 	err = os.WriteFile(testFile, []byte("data"), 0644)
 	require.NoError(t, err)
 
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 	cancel()
 	<-done
 
