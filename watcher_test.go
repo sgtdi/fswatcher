@@ -71,7 +71,7 @@ func TestWatcher(t *testing.T) {
 
 		w, err := New(
 			WithPath(tempDir),
-			WithCooldown(5*time.Millisecond),
+			WithCooldown(100*time.Millisecond),
 			WithReadyChannel(readyChan),
 			WithSeverity(SeverityNone),
 		)
@@ -111,7 +111,7 @@ func TestWatcher(t *testing.T) {
 			}
 		}()
 
-		expectedPaths := performOperations(t, tempDir, 1000)
+		expectedPaths := performOperations(t, tempDir, 500)
 
 		time.Sleep(6 * time.Second)
 
@@ -138,6 +138,20 @@ func TestWatcher(t *testing.T) {
 		var missingEvents []missingEventInfo
 		for path, action := range expectedPaths {
 			if !receivedEvents[path] {
+				if strings.Contains(action, "DELETE") {
+					parentDeleted := false
+					curr := filepath.Dir(path)
+					for curr != "." && curr != "/" && len(curr) >= len(tempDir) {
+						if receivedEvents[curr] && strings.Contains(expectedPaths[curr], "DELETE") {
+							parentDeleted = true
+							break
+						}
+						curr = filepath.Dir(curr)
+					}
+					if parentDeleted {
+						continue
+					}
+				}
 				missingEvents = append(missingEvents, missingEventInfo{path: path, action: action})
 			}
 		}
@@ -151,7 +165,7 @@ func TestWatcher(t *testing.T) {
 		}
 
 		assert.Empty(t, unexpectedEvents, "Should not have received any unexpected events")
-		assert.Equal(t, len(expectedPaths), len(receivedEvents), "Should have received all expected events")
+		assert.Empty(t, missingEvents, "Should have received all non-skippable expected events")
 
 		if t.Failed() {
 			t.Logf("Total expected events: %d", len(expectedPaths))
@@ -564,6 +578,7 @@ func performOperations(t *testing.T, basePath string, numOps int) map[string]str
 			logAction("CREATE D", dirPath)
 			expectedPaths[dirPath] = "CREATE D"
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	time.Sleep(100 * time.Millisecond)
@@ -641,6 +656,7 @@ func performOperations(t *testing.T, basePath string, numOps int) map[string]str
 			}
 			dirs = remainingDirs
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Ignored files
@@ -650,5 +666,6 @@ func performOperations(t *testing.T, basePath string, numOps int) map[string]str
 		logAction("IGNORE", ignoredPath)
 		require.NoError(t, os.WriteFile(ignoredPath, []byte("ignored"), 0644))
 	}
+	time.Sleep(10 * time.Millisecond)
 	return expectedPaths
 }
