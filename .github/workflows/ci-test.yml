@@ -63,8 +63,28 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             go test -v -coverprofile=coverage.out -count=1 ./...
           else
+            # Run standard tests (CGO_ENABLED=1 by default on macOS/Linux)
+            echo "Running Standard Tests (CGO_ENABLED=1)..."
             go test -v -race -coverprofile=coverage.out -count=1 ./...
+
+            # Additional test for macOS kqueue backend (Pure Go)
+            if [[ "$RUNNER_OS" == "macOS" ]]; then
+              echo "Running Pure Go (kqueue) tests..."
+              CGO_ENABLED=0 go test -v -count=1 ./...
+            fi
           fi
+
+      - name: "Verify BSD Compilation"
+        if: runner.os == 'Linux' # Run verification on Linux runner
+        run: |
+          echo "Verifying build for FreeBSD..."
+          GOOS=freebsd go build ./...
+          echo "Verifying build for OpenBSD..."
+          GOOS=openbsd go build ./...
+          echo "Verifying build for NetBSD..."
+          GOOS=netbsd go build ./...
+          echo "Verifying build for DragonFly BSD..."
+          GOOS=dragonfly go build ./...
 
       - name: "Upload coverage report"
         uses: actions/upload-artifact@v6

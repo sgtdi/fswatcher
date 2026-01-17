@@ -30,10 +30,30 @@ FSWatcher uses native OS APIs for efficient, low-overhead monitoring with near-z
 
 | Platform | Native System API Used | Status |
 | :--- | :--- | :--- |
-| **macOS** | `FSEvents` framework | Fully supported |
-| **Linux** | `inotify` | Fully supported |
+| ✅ **macOS** | `FSEvents` framework | Default (requires CGO) |
+| | `kqueue` | Supported (Pure Go, no CGO) |
+| ✅ **BSD** (FreeBSD, OpenBSD, NetBSD, DragonFly) | `kqueue` | Fully supported (Pure Go) |
+| ✅ **Linux** | `inotify` | Fully supported |
 | | `fanotify` | Partial support (planned for future enhancements) |
 | **Windows** | `ReadDirectoryChangesW` | Fully supported |
+
+### macOS and BSD Support
+
+On macOS, FSWatcher supports two backends:
+
+1.  **FSEvents (Default):** Uses the native macOS FSEvents framework. This is the recommended backend for macOS as it provides the most efficient and comprehensive monitoring. It requires CGO (`CGO_ENABLED=1`).
+2.  **kqueue (Pure Go):** Uses the BSD `kernel queue` notification interface. This allows to build a static binary without CGO (`CGO_ENABLED=0`), with a shared backend that can be used with other BSD systems (FreeBSD, OpenBSD, NetBSD, DragonFly).
+
+**Why use FSEvents (CGO)?**
+The `FSEvents` API is designed specifically for file system monitoring and includes OS-level coalescing. This makes it significantly more accurate and CPU-efficient than `kqueue` for high-volume operations. Benchmarks show `FSEvents` achieves 100% path detection accuracy where **`kqueue` may miss up to 30% of events** for short-lived files under heavy load.
+
+To use the `kqueue` backend on macOS, simply disable CGO when building your application:
+
+```bash
+CGO_ENABLED=0 go build
+```
+
+The library automatically selects the correct implementation based on the build tags. For BSD systems, `kqueue` is the default and only backend (CGO is not required).
 
 ## Why FSWatcher
 
@@ -168,6 +188,8 @@ The project is designed to be lightweight and easy to understand, with a clear s
 ├── logs.go                    # Logging helpers
 ├── errors.go                  # Custom error types
 ├── watcher_darwin.go          # macOS (FSEvents) implementation
+├── watcher_kqueue.go          # kqueue implementation (macOS no-cgo & BSD)
+├── watcher_bsd.go             # BSD-specific initialization
 ├── watcher_linux.go           # Linux platform loader
 ├── watcher_linux_inotify.go   # Linux (inotify) implementation
 ├── watcher_linux_fanotify.go  # Linux (fanotify) placeholder
