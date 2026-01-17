@@ -1,93 +1,99 @@
 name: Go CI Test
 
 on:
-  push:
-    branches:
-      - dev
-      - main
-      - feature/**
-  pull_request:
-    branches:
-      - main
+    push:
+        branches:
+            - dev
+            - main
+            - feature/**
+    pull_request:
+        branches:
+            - main
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
 
 jobs:
-  test:
-    name: "Test on ${{ matrix.os_name }}"
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Disabled due to premium runner
-          #- os: macos-25-large
-          #  os_name: macOS 25 (Intel x64)
-          - os: macos-26
-            os_name: macOS 26 beta (ARM64)
-          - os: macos-latest
-            os_name: macOS (ARM64)
-          - os: ubuntu-latest
-            os_name: Ubuntu (Linux)
-          - os: windows-latest
-            os_name: Windows
+    test:
+        name: "Test on ${{ matrix.os_name }}"
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    # Disabled due to premium runner
+                    #- os: macos-25-large
+                    #  os_name: macOS 25 (Intel x64)
+                    - os: macos-26
+                      os_name: macOS 26 beta (ARM64)
+                    - os: macos-latest
+                      os_name: macOS (ARM64)
+                    - os: ubuntu-latest
+                      os_name: Ubuntu (Linux)
+                    - os: windows-latest
+                      os_name: Windows
 
-    timeout-minutes: 10
+        timeout-minutes: 10
 
-    steps:
-      - name: "Checkout repository"
-        uses: actions/checkout@v6
+        steps:
+            - name: "Checkout repository"
+              uses: actions/checkout@v6
 
-      - name: "Set up Go"
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: "go.mod"
+            - name: "Set up Go"
+              uses: actions/setup-go@v6
+              with:
+                  go-version-file: "go.mod"
 
-      - name: "Verify Go installation"
-        shell: bash
-        run: |
-          go version
-          go env GOOS GOARCH
-          if [[ "$RUNNER_OS" == "macOS" ]]; then sw_vers; fi
-          if [[ "$RUNNER_OS" == "Linux" ]]; then uname -a; fi
-          if [[ "$RUNNER_OS" == "Windows" ]]; then uname -a; fi
+            - name: "Verify Go installation"
+              shell: bash
+              run: |
+                  go version
+                  go env GOOS GOARCH
+                  if [[ "$RUNNER_OS" == "macOS" ]]; then sw_vers; fi
+                  if [[ "$RUNNER_OS" == "Linux" ]]; then uname -a; fi
+                  if [[ "$RUNNER_OS" == "Windows" ]]; then uname -a; fi
 
-      - name: "Install dependencies"
-        run: go mod download
+            - name: "Install dependencies"
+              run: go mod download
 
-      - name: "Run tests"
-        shell: bash
-        run: |
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            go test -v -coverprofile=coverage.out -count=1 ./...
-          else
-            # Run standard tests (CGO_ENABLED=1 by default on macOS/Linux)
-            echo "Running Standard Tests (CGO_ENABLED=1)..."
-            go test -v -race -coverprofile=coverage.out -count=1 ./...
+            - name: "Run tests"
+              shell: bash
+              run: |
+                  if [[ "$RUNNER_OS" == "Windows" ]]; then
+                    go test -v -coverprofile=coverage.out -count=1 ./...
+                  else
+                    # Run standard tests (CGO_ENABLED=1 by default on macOS/Linux)
+                    echo "Running Standard Tests (CGO_ENABLED=1)..."
+                    go test -v -race -coverprofile=coverage.out -count=1 ./...
 
-            # Additional test for macOS kqueue backend (Pure Go)
-            if [[ "$RUNNER_OS" == "macOS" ]]; then
-              echo "Running Pure Go (kqueue) tests..."
-              CGO_ENABLED=0 go test -v -count=1 ./...
-            fi
-          fi
+                    # Additional test for macOS kqueue backend (Pure Go)
+                    if [[ "$RUNNER_OS" == "macOS" ]]; then
+                      echo "Running Pure Go (kqueue) tests..."
+                      CGO_ENABLED=0 go test -v -count=1 ./...
+                    fi
 
-      - name: "Verify BSD Compilation"
-        if: runner.os == 'Linux' # Run verification on Linux runner
-        run: |
-          echo "Verifying build for FreeBSD..."
-          GOOS=freebsd go build ./...
-          echo "Verifying build for OpenBSD..."
-          GOOS=openbsd go build ./...
-          echo "Verifying build for NetBSD..."
-          GOOS=netbsd go build ./...
-          echo "Verifying build for DragonFly BSD..."
-          GOOS=dragonfly go build ./...
+                    # Additional test for Linux fanotify backend (requires sudo)
+                    if [[ "$RUNNER_OS" == "Linux" ]]; then
+                      echo "Running Fanotify tests (requires sudo)..."
+                      sudo -E $(which go) test -v -count=1 -run TestFanotify_Backend ./...
+                    fi
+                  fi
 
-      - name: "Upload coverage report"
-        uses: actions/upload-artifact@v6
-        with:
-          name: coverage-report-${{ matrix.os }}
-          path: coverage.out
+            - name: "Verify BSD Compilation"
+              if: runner.os == 'Linux' # Run verification on Linux runner
+              run: |
+                  echo "Verifying build for FreeBSD..."
+                  GOOS=freebsd go build ./...
+                  echo "Verifying build for OpenBSD..."
+                  GOOS=openbsd go build ./...
+                  echo "Verifying build for NetBSD..."
+                  GOOS=netbsd go build ./...
+                  echo "Verifying build for DragonFly BSD..."
+                  GOOS=dragonfly go build ./...
+
+            - name: "Upload coverage report"
+              uses: actions/upload-artifact@v6
+              with:
+                  name: coverage-report-${{ matrix.os }}
+                  path: coverage.out
