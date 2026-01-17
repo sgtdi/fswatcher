@@ -35,7 +35,7 @@ FSWatcher uses native OS APIs for efficient, low-overhead monitoring with near-z
 | ✅ **BSD** (FreeBSD, OpenBSD, NetBSD, DragonFly) | `kqueue` | Fully supported (Pure Go) |
 | ✅ **Linux** | `inotify` | Fully supported |
 | | `fanotify` | Partial support (planned for future enhancements) |
-| **Windows** | `ReadDirectoryChangesW` | Fully supported |
+| ✅ **Windows** | `ReadDirectoryChangesW` | Fully supported |
 
 ### macOS and BSD Support
 
