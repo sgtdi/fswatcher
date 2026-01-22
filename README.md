@@ -74,29 +74,38 @@ To add FSWatcher to your project, use `go get`:
 go get github.com/sgtdi/fswatcher
 ```
 
-
 ```go
 package main
 
 import (
-    "context"
-    "fmt"
-    "github.com/sgtdi/fswatcher"
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/sgtdi/fswatcher"
 )
 
 func main() {
-    // Create watcher with debouncing
+    // Create watcher with debouncing that watches the current working directory
     w, _ := fswatcher.New(
-        fswatcher.WithPath("./src"),
         fswatcher.WithCooldown(200*time.Millisecond),
     )
 
     ctx := context.Background()
     go w.Watch(ctx)
+    fmt.Println("fswatcher started, change a file in watcher dir")
 
     // Process clean, debounced events
     for event := range w.Events() {
-        fmt.Printf("File changed: %s (%s)\n", event.Path, event.Op)
+        var types, flags []string
+        // Loop through types and flags
+        for _, t := range event.Types {
+            types = append(types, t.String())
+        }
+        for _, f := range event.Flags {
+            flags = append(flags, f)
+        }
+        fmt.Printf("File changed: %s %v %v\n", event.Path, types, flags)
     }
 }
 ```
@@ -187,7 +196,8 @@ The project is designed to be lightweight and easy to understand, with a clear s
 ├── filters.go                 # Path filtering logic
 ├── logs.go                    # Logging helpers
 ├── errors.go                  # Custom error types
-├── watcher_darwin.go          # macOS (FSEvents) implementation
+├── watcher_darwin.go          # macOS (Pure Go bridge)
+├── watcher_darwin_fsevents.go # macOS (FSEvents CGO) implementation
 ├── watcher_kqueue.go          # kqueue implementation (macOS no-cgo & BSD)
 ├── watcher_bsd.go             # BSD-specific initialization
 ├── watcher_linux.go           # Linux platform loader
@@ -218,7 +228,7 @@ func main() {
 
 	// Create a new fswatcher instance with options
 	fsw, err := fswatcher.New(
-		fswatcher.WithPath("./"),
+		fswatcher.WithPath("./"), // Set the path to watch, you can add multiple paths
 		fswatcher.WithSeverity(fswatcher.SeverityDebug),
 	)
 	if err != nil {
@@ -236,14 +246,8 @@ func main() {
 	}()
 
 	// Listen for events or a shutdown signal
-	for {
-		select {
-		case event, ok := <-fsw.Events():
-			if !ok {
-				return // Channel closed
-			}
-			fmt.Printf("Received event:\n%s", event.String())
-		}
+	for event := range fsw.Events() {
+		fmt.Printf("Received event:\n%s", event.String())
 	}
 }
 ```
