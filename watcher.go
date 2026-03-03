@@ -45,11 +45,11 @@ type WatcherStats struct {
 
 // watcherStats holds internal, mutable statistics
 type watcherStats struct {
-	startTime       time.Time
 	eventsProcessed int64
 	eventsDropped   int64
 	eventsFiltered  int64
 	eventsLost      int64
+	startTime       time.Time
 }
 
 // watcher implements the Watcher interface
