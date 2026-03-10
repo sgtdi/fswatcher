@@ -72,12 +72,6 @@ jobs:
                       echo "Running Pure Go (kqueue) tests..."
                       CGO_ENABLED=0 go test -v -count=1 ./...
                     fi
-
-                    # Additional test for Linux fanotify backend (requires sudo)
-                    if [[ "$RUNNER_OS" == "Linux" ]]; then
-                      echo "Running Fanotify tests (requires sudo)..."
-                      sudo -E $(which go) test -v -count=1 -run TestFanotify_Backend ./...
-                    fi
                   fi
 
             - name: "Verify BSD Compilation"

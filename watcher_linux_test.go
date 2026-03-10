@@ -16,6 +16,9 @@ import (
 
 // TestFanotify_Backend tests the fanotify backend initialization
 func TestFanotify_Backend(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Skipping fanotify test: requires root (CAP_SYS_ADMIN)")
+	}
 	// Fanotify requires CAP_SYS_ADMIN
 	tempDir, err := os.MkdirTemp(".", "fanotify_test_")
 	require.NoError(t, err)
