@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,16 +17,12 @@ import (
 
 // Default values for watcher config
 const (
-	DefaultCooldown        = 100 * time.Millisecond
-	DefaultBufferSize      = 4096
-	DefaultCleanupInterval = 5 * time.Minute
-	CleanupAge             = 15 * time.Minute
-	CleanupThreshold       = 1000
+	DefaultCooldown   = 100 * time.Millisecond
+	DefaultBufferSize = 4096
 )
 
 // Limits and validation constants
 const (
-	MinCooldownDuration   = 1 * time.Millisecond
 	MaxCooldownDuration   = 10 * time.Second
 	MaxBufferSize         = 256 * 1024
 	MinDroppedBuffer      = 16
@@ -63,9 +60,7 @@ type watcher struct {
 
 	// Configuration fields
 	init              error
-	path              string
 	cooldown          time.Duration
-	batchDuration     time.Duration
 	bufferSize        int
 	severity          Severity
 	ownsEventsChannel bool
@@ -82,9 +77,8 @@ type watcher struct {
 	readyChan chan struct{}
 
 	// Components
-	batcher   *eventBatcher
-	filter    PathFilter
-	debouncer Debouncer
+	aggregator *EventAggregator
+	filter     PathFilter
 
 	// Paths
 	paths        []*WatchPath
@@ -92,12 +86,11 @@ type watcher struct {
 	pathMu       sync.RWMutex
 
 	// Synchronization and logs
-	eventWg     sync.WaitGroup
-	logMu       sync.Mutex
-	logFile     *os.File
-	logger      *log.Logger
-	proxy       sync.Once
-	eventsProxy chan WatchEvent
+	eventWg sync.WaitGroup
+	logMu   sync.Mutex
+	logPath string
+	logFile *os.File
+	logger  *slog.Logger
 
 	// Darwin fields
 	handle   uintptr
@@ -123,6 +116,8 @@ type Watcher interface {
 	Stats() WatcherStats
 	// Paths returns a slice of the absolute paths currently being watched
 	Paths() []string
+	// Log handles leveled logging using the watcher's configured logger
+	Log(level Severity, msg string, args ...any)
 	// Close gracefully shuts down the watcher
 	Close()
 }
@@ -198,10 +193,7 @@ func New(options ...WatcherOpt) (Watcher, error) {
 	}
 
 	w.filter = newPatternFilter(includePatterns, excludePatterns)
-	w.debouncer = newDebouncer(w.cooldown)
-	if w.batchDuration > 0 {
-		w.batcher = newEventBatcher(w, w.batchDuration)
-	}
+	w.aggregator = newEventAggregator(w, w.cooldown)
 	w.stats.startTime = time.Now()
 	return w, nil
 }
@@ -221,26 +213,29 @@ func compileRegex(patterns []string) ([]*regexp.Regexp, error) {
 
 // Watch starts the main event loop for the watcher
 func (w *watcher) Watch(ctx context.Context) error {
+	if err := w.initLogger(); err != nil {
+		return err
+	}
+
 	if err := w.validateConfig(); err != nil {
 		return newError("config", "", err)
 	}
 
 	if w.severity <= SeverityDebug {
-		w.logDebug("Watcher configuration:")
-		w.logDebug("  - Cooldown: %v", w.cooldown)
-		w.logDebug("  - BufferSize: %d", w.bufferSize)
-		w.logDebug("  - BatchDuration: %v", w.batchDuration)
+		w.logDebug("Watcher configuration",
+			"cooldown", w.cooldown,
+			"bufferSize", w.bufferSize)
 		w.pathMu.RLock()
 		paths := make([]string, 0, len(w.watchedPaths))
 		for p := range w.watchedPaths {
 			paths = append(paths, p)
 		}
 		w.pathMu.RUnlock()
-		w.logDebug("  - WatchedPaths: %v", paths)
+		w.logDebug("Watcher paths", "paths", paths)
 	}
 
 	if !w.isRunning.CompareAndSwap(false, true) {
-		return newError("start", w.path, errors.New("watcher is already running"))
+		return newError("start", "", errors.New("watcher is already running"))
 	}
 	defer w.isRunning.Store(false)
 
@@ -254,10 +249,6 @@ func (w *watcher) Watch(ctx context.Context) error {
 		}
 		cancel()
 	}()
-
-	// Start the debouncer cleanup goroutine
-	w.eventWg.Add(1)
-	go w.runCleanup(watchCtx)
 
 	// Start the platform-specific watching mechanism
 	done, err := w.startPlatform(watchCtx)
@@ -286,8 +277,8 @@ func (w *watcher) Watch(ctx context.Context) error {
 	w.logInfo("Watcher shutting down...")
 	w.isShuttingDown.Store(true)
 
-	if w.batcher != nil {
-		w.batcher.close()
+	if w.aggregator != nil {
+		w.aggregator.close()
 	}
 
 	if w.ownsEventsChannel {
@@ -373,29 +364,7 @@ func (w *watcher) DropPath(path string) error {
 
 // Events returns the event channel.
 func (w *watcher) Events() <-chan WatchEvent {
-	// If logging is not verbose enough to show individual events, return the original channel directly.
-	if w.severity < SeverityInfo {
-		return w.events
-	}
-
-	// Use sync.Once to ensure the proxy channel and goroutine are created only once.
-	w.proxy.Do(func() {
-		// Create a proxy channel with the same buffer size as the original.
-		w.eventsProxy = make(chan WatchEvent, w.bufferSize)
-
-		// Start a single goroutine to safely read from the original channel and forward to the proxy.
-		go func() {
-			// When the original events channel closes, this loop will terminate, and we close the proxy channel.
-			defer close(w.eventsProxy)
-			for ev := range w.events {
-				// Log each event before forwarding it to the consumer.
-				w.logDebug("Raw event: %s", ev.String())
-				w.eventsProxy <- ev
-			}
-		}()
-	})
-
-	return w.eventsProxy
+	return w.events
 }
 
 // Dropped returns the dropped event channel
@@ -437,6 +406,11 @@ func (w *watcher) Paths() []string {
 	return paths
 }
 
+// Log handles leveled logging
+func (w *watcher) Log(level Severity, msg string, args ...any) {
+	w.log(level, msg, args...)
+}
+
 // Close gracefully shuts down the watcher
 func (w *watcher) Close() {
 	if w.isShuttingDown.CompareAndSwap(false, true) {
@@ -453,17 +427,43 @@ func (w *watcher) validateConfig() error {
 	if w.cooldown < 0 || w.cooldown > MaxCooldownDuration {
 		return fmt.Errorf("cooldown must be between 0 and %v", MaxCooldownDuration)
 	}
-	if w.batchDuration < 0 {
-		return errors.New("batch duration cannot be negative")
+	return nil
+}
+
+// initLogger initializes the logger based on logPath
+func (w *watcher) initLogger() error {
+	w.logMu.Lock()
+	defer w.logMu.Unlock()
+
+	if w.logPath == "" && w.severity == SeverityNone {
+		w.logger = nil
+		w.logFile = nil
+		return nil
 	}
-	if w.batchDuration > 0 && w.batchDuration < MinCooldownDuration {
-		return fmt.Errorf("batch duration is too small (minimum is %v), or set to 0 to disable", MinCooldownDuration)
+
+	opts := &slog.HandlerOptions{
+		Level: slog.Level(w.severity),
 	}
+
+	var handler slog.Handler
+	if w.logPath == "stdout" || w.logPath == "" {
+		handler = slog.NewTextHandler(os.Stdout, opts)
+	} else {
+		file, err := os.OpenFile(w.logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return newError("initLogger", w.logPath, fmt.Errorf("failed to open log file: %w", err))
+		}
+		w.logFile = file
+		handler = slog.NewTextHandler(file, opts)
+	}
+
+	w.logger = slog.New(handler)
 	return nil
 }
 
 // sendToChannel sends an event to the appropriate channel
 func (w *watcher) sendToChannel(event WatchEvent) {
+	w.logDebug("Raw event: %s", event.String())
 	select {
 	case w.events <- event:
 		atomic.AddInt64(&w.stats.eventsProcessed, 1)
@@ -481,23 +481,90 @@ func (w *watcher) sendToChannel(event WatchEvent) {
 	}
 }
 
-// runCleanup periodically cleans the debouncer cache
-func (w *watcher) runCleanup(ctx context.Context) {
-	defer w.eventWg.Done()
-	ticker := time.NewTicker(DefaultCleanupInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			cleaned := w.debouncer.Cleanup(CleanupAge)
-			if cleaned > 0 {
-				w.log(SeverityDebug, "Cleaned up %d stale entries from debouncer cache", cleaned)
-			}
-		case <-ctx.Done():
-			return
-		}
+// scanDirectory performs a manual scan of a directory and emits events for its contents
+func (w *watcher) scanDirectory(path string) {
+	if w.isShuttingDown.Load() {
+		return
 	}
+
+	w.logInfo("Starting manual scan of directory: %s", path)
+
+	err := filepath.Walk(path, func(filePath string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // Skip files with errors
+		}
+
+		// Don't emit event for the root path being scanned
+		if filePath == path {
+			return nil
+		}
+
+		// Emit a generic Mod event for everything found
+		// This ensures consumers are notified that something changed
+		w.handlePlatformEvent(WatchEvent{
+			Path:  filePath,
+			Types: []EventType{EventMod},
+			Time:  time.Now(),
+		})
+
+		// If it's a directory and we are not recursive, don't walk into it
+		if info.IsDir() {
+			w.pathMu.RLock()
+			var parentWatch *WatchPath
+			for watchedDir, wp := range w.watchedPaths {
+				if strings.HasPrefix(filepath.Clean(path), filepath.Clean(watchedDir)) {
+					parentWatch = wp
+					break
+				}
+			}
+			w.pathMu.RUnlock()
+
+			if parentWatch != nil && parentWatch.Depth == WatchTopLevel {
+				return filepath.SkipDir
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		w.logError("Manual scan failed for %s: %v", path, err)
+	} else {
+		w.logInfo("Manual scan completed for: %s", path)
+	}
+}
+
+// backoffState maintains the retry state for a platform loop
+type backoffState struct {
+	retryCount int
+	duration   time.Duration
+}
+
+// newBackoffState creates a new backoffState with default values
+func newBackoffState() *backoffState {
+	return &backoffState{
+		duration: 10 * time.Millisecond,
+	}
+}
+
+// handleLoopError applies exponential backoff and returns false if retries are exhausted
+func (w *watcher) handleLoopError(platform string, err error, state *backoffState) bool {
+	const maxRetries = 5
+	w.logError("%s error: %v", platform, err)
+	state.retryCount++
+	if state.retryCount > maxRetries {
+		w.logError("%s: too many errors, shutting down platform", platform)
+		return false
+	}
+	time.Sleep(state.duration)
+	state.duration *= 2
+	return true
+}
+
+// resetBackoff resets the retry state on success
+func (w *watcher) resetBackoff(state *backoffState) {
+	state.retryCount = 0
+	state.duration = 10 * time.Millisecond
 }
 
 // handlePlatformEvent processes raw events from the OS
@@ -547,19 +614,6 @@ func (w *watcher) handlePlatformEvent(event WatchEvent) {
 		return
 	}
 
-	// Debounce
-	merged, ok := w.debouncer.ShouldProcess(event)
-	if !ok {
-		w.log(SeverityDebug, "Merged by debouncer: %s → %v", merged.Path, merged.Types)
-		return
-	}
-
-	// Dispatch
-	if w.batcher != nil {
-		w.log(SeverityDebug, "Dispatching event to batcher: %s", merged.String())
-		w.batcher.addEvent(merged)
-	} else {
-		w.log(SeverityDebug, "Dispatching event directly: %s", merged.String())
-		w.sendToChannel(merged)
-	}
+	// Aggregate
+	w.aggregator.addEvent(event)
 }

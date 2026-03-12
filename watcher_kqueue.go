@@ -63,7 +63,7 @@ func (w *watcher) startPlatform(ctx context.Context) (<-chan struct{}, error) {
 func (w *watcher) runKqueueLoop(ctx context.Context, k *kqueue, done chan struct{}) {
 	// Closes all open descriptors and kqueue instance
 	defer func() {
-		w.logDebug("kqueue platform shutting down...")
+		w.logDebug("kqueue platform shutting down")
 		k.mu.Lock()
 		for fd := range k.wds {
 			unix.Close(fd)
@@ -76,44 +76,45 @@ func (w *watcher) runKqueueLoop(ctx context.Context, k *kqueue, done chan struct
 		close(done)
 	}()
 
-		// Init event buffer and timeout
-		events := make([]unix.Kevent_t, w.bufferSize)
-		ts := unix.NsecToTimespec(w.cooldown.Nanoseconds())
-		timeout := &ts
-		backoff := newBackoffState()
+	// Init event buffer and timeout
+	events := make([]unix.Kevent_t, w.bufferSize)
+	ts := unix.NsecToTimespec(w.cooldown.Nanoseconds())
+	timeout := &ts
+	backoff := newBackoffState()
 
-		for {
-			select {
-			case <-ctx.Done():
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Polling
+		n, err := unix.Kevent(k.kqFd, nil, events, timeout)
+		if err != nil {
+			// Interrupted signal
+			if err == unix.EINTR {
+				continue
+			}
+
+			if !w.handleLoopError("kqueue", err, backoff) {
 				return
-			default:
 			}
+			continue
+		}
 
-			// Polling
-			n, err := unix.Kevent(k.kqFd, nil, events, timeout)
-			if err != nil {
-				// Interrupted signal
-				if err == unix.EINTR {
-					continue
-				}
+		// Success, reset backoff
+		w.resetBackoff(backoff)
 
-				if !w.handleLoopError("kqueue", err, backoff) {
-					return
-				}
-				continue
-			}
+		// No events occurred, loop back
+		if n == 0 {
+			continue
+		}
 
-			// Success, reset backoff
-			w.resetBackoff(backoff)
-
-			// No events occurred, loop back
-			if n == 0 {
-				continue
-			}
-
-			// Include the 'n' events returned
-			w.processKqueueEvents(k, events[:n])
-		}}
+		// Include the 'n' events returned
+		w.processKqueueEvents(k, events[:n])
+	}
+}
 
 // processKqueueEvents handles events from the kqueue
 func (w *watcher) processKqueueEvents(k *kqueue, events []unix.Kevent_t) {
@@ -198,17 +199,9 @@ func (w *watcher) scanDirectoryLocked(k *kqueue, dirPath string) {
 
 	if len(newEntries) > 0 {
 		if err := k.batchAddWatchesLocked(newEntries); err == nil {
-			for _, e := range newEntries {
-				// Verify it was actually added (skipped system files etc)
-				if _, ok := k.paths[e.path]; ok {
-					// Emit to avoid deadlock
-					go w.handlePlatformEvent(WatchEvent{
-						Path:  e.path,
-						Types: []EventType{EventCreate},
-						Time:  time.Now(),
-					})
-				}
-			}
+			w.logInfo("Detected and added new entries", "count", len(newEntries), "dir", dirPath)
+		} else {
+			w.logWarn("Failed to add watches for new entries", "error", err)
 		}
 	}
 }
@@ -248,7 +241,7 @@ func (k *kqueue) batchAddWatchesLocked(entries []struct {
 			}
 			if err != nil {
 				if err == unix.EMFILE || err == unix.ENFILE {
-					k.w.logWarn("kqueue: reached open file limit (ulimit -n), skipping %s. Consider increasing system limits.", e.path)
+					k.w.logWarn("kqueue: reached open file limit (ulimit -n), consider increasing system limits", "path", e.path)
 				}
 				continue // Skip unreadable files
 			}
@@ -324,12 +317,11 @@ func (k *kqueue) addSingleWatchLocked(path string) error {
 		}
 		if err != nil {
 			if err == unix.EMFILE || err == unix.ENFILE {
-				k.w.logWarn("kqueue: reached open file limit (ulimit -n), skipping %s. Consider increasing system limits.", path)
+				k.w.logWarn("kqueue: reached open file limit (ulimit -n), consider increasing system limits", "path", path)
 			}
 			return err
 		}
 	}
-
 	events := []unix.Kevent_t{
 		{
 			Ident:  uint64(fd),
