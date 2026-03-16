@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -289,7 +288,7 @@ func (w *watcher) Watch(ctx context.Context) error {
 
 	if w.logFile != nil {
 		if err := w.logFile.Close(); err != nil {
-			log.Printf("fswatcher: error closing log file: %v", err)
+			fmt.Fprintf(os.Stderr, "fswatcher: error closing log file: %v\n", err)
 		}
 	}
 
