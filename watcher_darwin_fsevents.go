@@ -345,7 +345,7 @@ func (f *fsEvents) addWatch(watchPath *WatchPath) error {
 	latency := C.double(streamLatency)
 
 	cDebug := C.int(0)
-	if f.w.severity >= SeverityDebug {
+	if f.w.severity <= SeverityDebug {
 		cDebug = 1
 	}
 
