@@ -313,6 +313,15 @@ func (w *watcher) AddPath(path string, options ...PathOption) error {
 	wp.filter = watchPath.filter
 	wp.eventMask = watchPath.eventMask
 
+	// Build per-path pattern filter from regex patterns if no explicit filter was set
+	if wp.filter == nil {
+		f, err := buildWatchPathFilter(watchPath)
+		if err != nil {
+			return err
+		}
+		wp.filter = f
+	}
+
 	w.pathMu.Lock()
 	defer w.pathMu.Unlock()
 
@@ -603,9 +612,16 @@ func (w *watcher) handlePlatformEvent(event WatchEvent) {
 		return
 	}
 
-	// Filter patterns
+	// Filter by global patterns
 	if !w.filter.ShouldInclude(event.Path) {
 		w.log(SeverityDebug, "Filtered by pattern: %s", event.Path)
+		atomic.AddInt64(&w.stats.eventsFiltered, 1)
+		return
+	}
+
+	// Filter by per-path patterns
+	if parentWatch != nil && parentWatch.filter != nil && !parentWatch.filter.ShouldInclude(event.Path) {
+		w.log(SeverityDebug, "Filtered by path pattern: %s", event.Path)
 		atomic.AddInt64(&w.stats.eventsFiltered, 1)
 		return
 	}

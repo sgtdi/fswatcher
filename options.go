@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 )
 
@@ -94,6 +95,16 @@ func WithPath(path string, options ...PathOption) WatcherOpt {
 		wp.filter = tempWp.filter
 		wp.eventMask = tempWp.eventMask
 
+		// Build per-path pattern filter from regex patterns if no explicit filter was set
+		if wp.filter == nil {
+			f, err := buildWatchPathFilter(tempWp)
+			if err != nil {
+				w.init = err
+				return
+			}
+			wp.filter = f
+		}
+
 		w.paths = append(w.paths, wp)
 	}
 }
@@ -108,10 +119,12 @@ const (
 
 // WatchPath holds the configuration for a single watched path
 type WatchPath struct {
-	Path      string
-	Depth     WatchDepth
-	filter    PathFilter
-	eventMask map[EventType]bool
+	Path              string
+	Depth             WatchDepth
+	filter            PathFilter
+	eventMask         map[EventType]bool
+	incRegexPatterns  []string
+	excRegexPatterns  []string
 }
 
 // PathOption is a function that configures a WatchPath
@@ -121,6 +134,27 @@ type PathOption func(*WatchPath)
 func WithDepth(depth WatchDepth) PathOption {
 	return func(p *WatchPath) {
 		p.Depth = depth
+	}
+}
+
+// WithPathFilter sets a custom PathFilter for a specific watched path
+func WithPathFilter(filter PathFilter) PathOption {
+	return func(p *WatchPath) {
+		p.filter = filter
+	}
+}
+
+// WithPathIncRegex sets include regex patterns for a specific watched path
+func WithPathIncRegex(patterns ...string) PathOption {
+	return func(p *WatchPath) {
+		p.incRegexPatterns = append(p.incRegexPatterns, patterns...)
+	}
+}
+
+// WithPathExcRegex sets exclude regex patterns for a specific watched path
+func WithPathExcRegex(patterns ...string) PathOption {
+	return func(p *WatchPath) {
+		p.excRegexPatterns = append(p.excRegexPatterns, patterns...)
 	}
 }
 
@@ -134,6 +168,28 @@ func WithEventMask(eventTypes ...EventType) PathOption {
 			p.eventMask[et] = true
 		}
 	}
+}
+
+// buildWatchPathFilter compiles regex patterns into a PathFilter for a WatchPath
+func buildWatchPathFilter(wp *WatchPath) (PathFilter, error) {
+	if len(wp.incRegexPatterns) == 0 && len(wp.excRegexPatterns) == 0 {
+		return nil, nil
+	}
+	var inc, exc []*regexp.Regexp
+	var err error
+	if len(wp.incRegexPatterns) > 0 {
+		inc, err = compileRegex(wp.incRegexPatterns)
+		if err != nil {
+			return nil, fmt.Errorf("path include regex: %w", err)
+		}
+	}
+	if len(wp.excRegexPatterns) > 0 {
+		exc, err = compileRegex(wp.excRegexPatterns)
+		if err != nil {
+			return nil, fmt.Errorf("path exclude regex: %w", err)
+		}
+	}
+	return newPatternFilter(inc, exc), nil
 }
 
 // validateWatchPath creates and validates a WatchPath struct

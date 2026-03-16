@@ -166,6 +166,49 @@ func TestWatcherOptions(t *testing.T) {
 			assert.True(t, watchPath.eventMask[EventRemove])
 		})
 
+		t.Run("with path inc/exc regex", func(t *testing.T) {
+			tempDir := t.TempDir()
+			w := &watcher{}
+
+			opt := WithPath(tempDir,
+				WithPathIncRegex(`.*\.go`),
+				WithPathExcRegex(`.*_test\.go`),
+			)
+			opt(w)
+
+			require.Nil(t, w.init)
+			require.Len(t, w.paths, 1)
+
+			watchPath := w.paths[0]
+			require.NotNil(t, watchPath.filter, "per-path filter should be built from regex patterns")
+			assert.True(t, watchPath.filter.ShouldInclude("/project/main.go"), "should include .go files")
+			assert.False(t, watchPath.filter.ShouldInclude("/project/main_test.go"), "should exclude _test.go files")
+			assert.False(t, watchPath.filter.ShouldInclude("/project/main.txt"), "should exclude non-.go files")
+		})
+
+		t.Run("with explicit path filter", func(t *testing.T) {
+			tempDir := t.TempDir()
+			w := &watcher{}
+
+			custom := newPatternFilter(nil, nil) // passthrough filter
+			opt := WithPath(tempDir, WithPathFilter(custom))
+			opt(w)
+
+			require.Nil(t, w.init)
+			require.Len(t, w.paths, 1)
+			assert.Equal(t, custom, w.paths[0].filter, "explicit filter should be used as-is")
+		})
+
+		t.Run("with invalid path regex", func(t *testing.T) {
+			tempDir := t.TempDir()
+			w := &watcher{}
+
+			opt := WithPath(tempDir, WithPathIncRegex(`[invalid`))
+			opt(w)
+
+			assert.NotNil(t, w.init, "invalid regex should set init error")
+		})
+
 		t.Run("with a non-existent path", func(t *testing.T) {
 			w := &watcher{}
 			opt := WithPath("/path/to/non/existent/dir")
