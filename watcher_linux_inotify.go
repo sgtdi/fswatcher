@@ -245,6 +245,10 @@ func (w *watcher) handleWatchRemovalEvents(p *inotify, e *unix.InotifyEvent, pat
 func (w *watcher) handleInotifyEvent(p *inotify, e *unix.InotifyEvent, now time.Time, buf []byte, offset int) {
 	if e.Mask&unix.IN_Q_OVERFLOW != 0 {
 		w.logError("inotify event queue overflowed")
+		w.handlePlatformEvent(WatchEvent{
+			Types: []EventType{EventOverflow},
+			Time:  now,
+		})
 		return
 	}
 

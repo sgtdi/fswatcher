@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -574,6 +575,12 @@ func (w *watcher) resetBackoff(state *backoffState) {
 // handlePlatformEvent processes raw events from the OS
 func (w *watcher) handlePlatformEvent(event WatchEvent) {
 	if w.isShuttingDown.Load() {
+		return
+	}
+
+	// Overflow events have no path and must bypass all path-based filtering
+	if slices.Contains(event.Types, EventOverflow) {
+		w.aggregator.addEvent(event)
 		return
 	}
 
