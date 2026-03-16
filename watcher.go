@@ -631,6 +631,22 @@ func (w *watcher) handlePlatformEvent(event WatchEvent) {
 		return
 	}
 
+	// Filter by per-path event mask
+	if parentWatch != nil && len(parentWatch.eventMask) > 0 {
+		filtered := event.Types[:0]
+		for _, t := range event.Types {
+			if parentWatch.eventMask[t] {
+				filtered = append(filtered, t)
+			}
+		}
+		if len(filtered) == 0 {
+			w.log(SeverityDebug, "Filtered by event mask: %s", event.Path)
+			atomic.AddInt64(&w.stats.eventsFiltered, 1)
+			return
+		}
+		event.Types = filtered
+	}
+
 	// Aggregate
 	w.aggregator.addEvent(event)
 }
