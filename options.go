@@ -3,7 +3,6 @@ package fswatcher
 import (
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -41,13 +40,6 @@ func WithExcRegex(patterns ...string) WatcherOpt {
 	}
 }
 
-// WithEventBatching enables and configures event batching; multiple events for the same path within the duration are merged into one
-func WithEventBatching(duration time.Duration) WatcherOpt {
-	return func(w *watcher) {
-		w.batchDuration = duration
-	}
-}
-
 // WithCustomChannels allows providing external channels for events
 func WithCustomChannels(events chan WatchEvent, dropped chan WatchEvent) WatcherOpt {
 	return func(w *watcher) {
@@ -67,22 +59,7 @@ func WithReadyChannel(ready chan struct{}) WatcherOpt {
 // WithLogFile sets a file for logging; if a path is empty, logging is disabled; if "stdout", logs to standard output
 func WithLogFile(path string) WatcherOpt {
 	return func(w *watcher) {
-		if path == "" {
-			w.logger = nil
-			w.logFile = nil
-			return
-		}
-		if path == "stdout" {
-			w.logger = log.New(os.Stdout, "", log.LstdFlags)
-			return
-		}
-		file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			w.logError("fswatcher: failed to open log file %q: %v", path, err)
-			return
-		}
-		w.logFile = file
-		w.logger = log.New(file, "", log.LstdFlags)
+		w.logPath = path
 	}
 }
 

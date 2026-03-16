@@ -19,14 +19,15 @@ const (
 	EventMod
 	EventRename
 	EventChmod
+	EventOverflow
 )
 
 // eventTypeNames maps EventType to its string representation
-var eventTypeNames = [...]string{"Unknown", "Create", "Delete", "Edit", "Rename", "Chmod"}
+var eventTypeNames = [...]string{"Unknown", "Create", "Delete", "Edit", "Rename", "Chmod", "Overflow"}
 
 // String returns the string representation of an EventType
 func (e EventType) String() string {
-	if e < EventUnknown || e > EventChmod {
+	if e < EventUnknown || e > EventOverflow {
 		return "Invalid"
 	}
 	return eventTypeNames[e]
@@ -51,50 +52,57 @@ func (we WatchEvent) String() string {
 		we.ID, we.Path, strings.Join(typeStrings, ", "), strings.Join(we.Flags, ", "), we.Time.Format(time.RFC3339Nano))
 }
 
-// eventBatcher merges multiple events for the same path over a short duration
-type eventBatcher struct {
-	events      map[string]*batchedEvent
-	timer       *time.Timer
-	batchPeriod time.Duration
-	watcher     *watcher
-	mu          sync.Mutex
-	isClosed    atomic.Bool
+// EventAggregator merges multiple events for the same path over a short duration
+type EventAggregator struct {
+	events   map[string]*aggregatedEvent
+	cooldown time.Duration
+	watcher  *watcher
+	mu       sync.Mutex
+	isClosed atomic.Bool
 }
 
-// batchedEvent holds merged data for events on the same path
-type batchedEvent struct {
-	path      string
-	types     map[EventType]struct{}
-	flags     map[string]struct{} // Use a map for automatic flag de-duplication
-	firstSeen time.Time
-	lastSeen  time.Time
-	eventID   uint64
+// aggregatedEvent holds merged data for events on the same path
+type aggregatedEvent struct {
+	path     string
+	types    map[EventType]struct{}
+	flags    map[string]struct{}
+	lastSeen time.Time
+	eventID  uint64
+	timer    *time.Timer
 }
 
-// newEventBatcher creates a new event batcher
-func newEventBatcher(w *watcher, batchPeriod time.Duration) *eventBatcher {
-	return &eventBatcher{
-		events:      make(map[string]*batchedEvent),
-		batchPeriod: batchPeriod,
-		watcher:     w,
+// newEventAggregator creates a new event aggregator
+func newEventAggregator(w *watcher, cooldown time.Duration) *EventAggregator {
+	return &EventAggregator{
+		events:   make(map[string]*aggregatedEvent),
+		cooldown: cooldown,
+		watcher:  w,
 	}
 }
 
-// addEvent adds an event to the current batch
-func (eb *eventBatcher) addEvent(event WatchEvent) {
-	if eb.isClosed.Load() {
+// addEvent adds an event to the aggregator
+func (ea *EventAggregator) addEvent(event WatchEvent) {
+	if ea.isClosed.Load() {
 		return
 	}
 
-	eb.mu.Lock()
-	defer eb.mu.Unlock()
+	ea.mu.Lock()
+	defer ea.mu.Unlock()
 
 	now := time.Now()
 
-	if existing, exists := eb.events[event.Path]; exists {
-		// Update existing batched event
+	existing, exists := ea.events[event.Path]
+	if exists {
+		// Stop the existing timer
+		if existing.timer != nil {
+			existing.timer.Stop()
+		}
+
+		// Update existing event
 		existing.lastSeen = now
-		existing.eventID = event.ID // Keep the latest event ID
+		if event.ID > existing.eventID {
+			existing.eventID = event.ID
+		}
 
 		for _, t := range event.Types {
 			existing.types[t] = struct{}{}
@@ -103,7 +111,7 @@ func (eb *eventBatcher) addEvent(event WatchEvent) {
 			existing.flags[f] = struct{}{}
 		}
 	} else {
-		// Create a new batched event
+		// Create a new aggregated event
 		types := make(map[EventType]struct{}, len(event.Types))
 		for _, t := range event.Types {
 			types[t] = struct{}{}
@@ -113,87 +121,77 @@ func (eb *eventBatcher) addEvent(event WatchEvent) {
 			flags[f] = struct{}{}
 		}
 
-		eb.events[event.Path] = &batchedEvent{
-			path:      event.Path,
-			types:     types,
-			flags:     flags,
-			firstSeen: now,
-			lastSeen:  now,
-			eventID:   event.ID,
+		existing = &aggregatedEvent{
+			path:     event.Path,
+			types:    types,
+			flags:    flags,
+			lastSeen: now,
+			eventID:  event.ID,
 		}
+		ea.events[event.Path] = existing
 	}
 
-	// Reset or start the timer to flush the batch
-	if eb.timer != nil {
-		eb.timer.Stop()
-	}
-	eb.timer = time.AfterFunc(eb.batchPeriod, eb.flush)
+	// Schedule or reschedule the flush for this specific path
+	path := event.Path
+	existing.timer = time.AfterFunc(ea.cooldown, func() {
+		ea.flushPath(path)
+	})
 }
 
-// flush sends all batched events
-func (eb *eventBatcher) flush() {
-	eb.mu.Lock()
-	defer eb.mu.Unlock()
-
-	// Don't flush if the batcher was already closed and flushed
-	if eb.isClosed.Load() {
+// flushPath sends a single aggregated event and removes it from the map
+func (ea *EventAggregator) flushPath(path string) {
+	ea.mu.Lock()
+	aggregated, exists := ea.events[path]
+	if !exists {
+		ea.mu.Unlock()
 		return
 	}
 
-	eb.flushLocked()
+	// Remove from map before sending to avoid race with new events
+	delete(ea.events, path)
+	ea.mu.Unlock()
+
+	// Collect unique types and flags
+	types := make([]EventType, 0, len(aggregated.types))
+	for t := range aggregated.types {
+		types = append(types, t)
+	}
+
+	flags := make([]string, 0, len(aggregated.flags))
+	for f := range aggregated.flags {
+		flags = append(flags, f)
+	}
+
+	ea.watcher.sendToChannel(WatchEvent{
+		ID:    aggregated.eventID,
+		Path:  aggregated.path,
+		Types: types,
+		Flags: flags,
+		Time:  aggregated.lastSeen,
+	})
 }
 
-// flushLocked performs the flush operation while holding the lock
-func (eb *eventBatcher) flushLocked() {
-	if len(eb.events) == 0 {
+// close stops the aggregator and flushes any remaining events
+func (ea *EventAggregator) close() {
+	if !ea.isClosed.CompareAndSwap(false, true) {
 		return
 	}
 
-	for path, batched := range eb.events {
-
-		// Collect unique types and flags
-		types := make([]EventType, 0, len(batched.types))
-		for t := range batched.types {
-			types = append(types, t)
+	ea.mu.Lock()
+	// Copy paths to avoid modification during iteration
+	paths := make([]string, 0, len(ea.events))
+	for path, aggregated := range ea.events {
+		if aggregated.timer != nil {
+			aggregated.timer.Stop()
 		}
-
-		flags := make([]string, 0, len(batched.flags))
-		for f := range batched.flags {
-			flags = append(flags, f)
-		}
-
-		finalEvent := WatchEvent{
-			ID:    batched.eventID,
-			Path:  path,
-			Types: types,
-			Flags: flags,
-			Time:  batched.lastSeen,
-		}
-
-		eb.watcher.sendToChannel(finalEvent)
+		paths = append(paths, path)
 	}
+	ea.mu.Unlock()
 
-	// Clear the batch for the next set of events
-	eb.events = make(map[string]*batchedEvent)
-}
-
-// close stops the batcher and flushes any remaining events
-func (eb *eventBatcher) close() {
-	// Ensure close logic runs only once
-	if !eb.isClosed.CompareAndSwap(false, true) {
-		return
+	// Flush everything immediately
+	for _, path := range paths {
+		ea.flushPath(path)
 	}
-
-	eb.mu.Lock()
-	defer eb.mu.Unlock()
-
-	// Stop the timer to prevent it from firing again
-	if eb.timer != nil {
-		eb.timer.Stop()
-	}
-
-	// Final flush before exiting
-	eb.flushLocked()
 }
 
 // uniqueEventTypes removes duplicate EventType values from a slice

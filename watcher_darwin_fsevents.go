@@ -237,6 +237,13 @@ func goHandleFSEvent(handle C.uintptr_t, numEvents C.size_t, cPaths **C.char, cF
 		flags := uint32(flagsSlice[i])
 		eventID := uint64(idsSlice[i])
 
+		// Handle MustScanSubDirs and dropped events
+		if flags&(FSEventStreamEventFlagMustScanSubDirs|FSEventStreamEventFlagUserDropped|FSEventStreamEventFlagKernelDropped) != 0 {
+			w.logWarn("FSEvents signaling potential data loss", "flags", fmt.Sprintf("%08x", flags), "path", path)
+			go w.scanDirectory(path)
+			continue
+		}
+
 		genericTypes := parseGenericEventFlags(flags)
 		if len(genericTypes) == 0 {
 			continue // Skip events we can't map to a generic type
@@ -264,7 +271,7 @@ func goLogStreamSuccess(handle C.uintptr_t, cPath *C.char) {
 	}
 	w := watcherPtr.(*watcher)
 	path := C.GoString(cPath)
-	w.logDebug("C DEBUG - FSEventStream created successfully for path: %s", path)
+	w.logDebug("FSEventStream created successfully", "path", path)
 }
 
 // fsEvents implements the platformNotifier interface using FSEvents
@@ -295,7 +302,7 @@ func (w *watcher) startPlatform(ctx context.Context) (<-chan struct{}, error) {
 
 	go func() {
 		<-ctx.Done()
-		w.logDebug("Platform backend shutting down...")
+		w.logDebug("Platform backend shutting down")
 		watcherMap.Delete(w.handle)
 
 		fse.mu.Lock()
@@ -305,7 +312,7 @@ func (w *watcher) startPlatform(ctx context.Context) (<-chan struct{}, error) {
 			C.FSEventStreamStop(streamRef)
 			C.FSEventStreamInvalidate(streamRef)
 			C.FSEventStreamRelease(streamRef)
-			w.logDebug("Platform backend cleaned up watch for path: %s", path)
+			w.logDebug("Platform backend cleaned up watch", "path", path)
 		}
 		fse.streams = make(map[string]C.FSEventStreamRef) // Clear the map
 
@@ -355,7 +362,7 @@ func (f *fsEvents) addWatch(watchPath *WatchPath) error {
 	}
 
 	f.streams[path] = streamRef
-	f.w.logInfo("Added watch for %s", path)
+	f.w.logInfo("Added watch", "path", path)
 	return nil
 }
 
@@ -379,6 +386,6 @@ func (f *fsEvents) removeWatch(path string) error {
 	C.FSEventStreamRelease(streamRef)
 
 	delete(f.streams, path)
-	f.w.logInfo("Removed watch for %s", path)
+	f.w.logInfo("Removed watch", "path", path)
 	return nil
 }

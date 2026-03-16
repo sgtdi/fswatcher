@@ -314,7 +314,8 @@ func TestWatcher(t *testing.T) {
 		testChan := make(chan WatchEvent, 1)
 
 		w := &watcher{
-			events: testChan,
+			events:   testChan,
+			severity: SeverityError, // Error (8) is > Info (0), so NO proxy should be created
 		}
 
 		eventsChan := w.Events()
@@ -324,7 +325,7 @@ func TestWatcher(t *testing.T) {
 		assert.Equal(t,
 			fmt.Sprintf("%p", testChan),
 			fmt.Sprintf("%p", eventsChan),
-			"Events() should return the same underlying channel instance",
+			"Events() should return the same underlying channel instance when severity > Info",
 		)
 
 		expectedEvent := WatchEvent{Path: "/path/to/file.txt"}

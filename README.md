@@ -6,7 +6,7 @@
 
 # FSWatcher
 
-**A production-ready file watcher for Go with built-in debouncing, batching, and filtering.**
+**A production-ready file watcher for Go with built-in debouncing and filtering.**
 
 FSWatcher is a robust, concurrent, and cross-platform file system watcher for Go. It provides a simple and powerful API to monitor directories for file system changes, designed for high-performance applications and development tools. The goal is to abstract away the complexities of platform-specific APIs, offering a unified, easy-to-use, and dependency-free interface.
 
@@ -57,10 +57,9 @@ The library automatically selects the correct implementation based on the build 
 
 ## Why FSWatcher
 
-Most Go file watchers give you raw OS events—which means duplicate events, noise from system files, and no event batching. FSWatcher solves this:
+Most Go file watchers give you raw OS events—which means duplicate events and noise from system files. FSWatcher solves this:
 
 - **Built-in debouncing** - Merge rapid-fire events automatically
-- **Event batching** - Group related changes into single events  
 - **Smart filtering** - Regex patterns + automatic system file exclusion (`.git`, `.DS_Store`, etc.)
 - **Zero dependencies** - Just standard library + native OS APIs
 - **Context-based** - Modern Go patterns with graceful shutdown
@@ -115,7 +114,6 @@ func main() {
 | Feature | FSWatcher | fsnotify / notify |
 |---------|-----------|-------------------|
 | Debouncing | Built-in, configurable | Manual implementation |
-| Event batching | Built-in | Manual implementation |
 | Path filtering | Regex include/exclude | Manual implementation |
 | System files | Auto-ignored | Manual filtering |
 | API style | Functional options | Imperative |
@@ -132,7 +130,6 @@ Customize the watcher's behavior using functional options passed to `fswatcher.N
 | `WithBufferSize(size)`      | Sets the size of the main event channel. | `4096` |
 | `WithIncRegex(patterns...)` | Sets a slice of regex patterns for paths to include. If a path matches any of these patterns, it will be processed. If this option is not used, all non-excluded paths are processed by default. | (none) |
 | `WithExcRegex(patterns...)` | Sets a slice of regex patterns for paths to exclude. If a path matches any of these patterns, it will be ignored. Exclusions always take precedence over inclusions. | (none) |
-| `WithEventBatching(d)`      | Enables and configures event batching. Multiple events for the same path within the duration are merged. | (disabled) |
 | `WithSeverity(level)`       | Sets the logging verbosity (`SeverityDebug`, `SeverityInfo`, `SeverityWarn`, `SeverityError`). | `SeverityWarn` |
 | `WithLogFile(path)`         | Sets a file for logging. Use `"stdout"` to log to the console or `""` to disable. | (disabled) |
 | `WithLinuxPlatform(p)`      | Sets a specific backend (`PlatformInotify` or `PlatformFanotify`) on Linux. | `PlatformInotify` |
@@ -177,11 +174,20 @@ The watcher operates in a clear, multi-stage pipeline that processes events conc
 | :--- | :--- |
 | **OS API** | The OS (`FSEvents`, `inotify`, `ReadDirectoryChangesW`) captures a raw file system event (e.g., a file was written to). |
 | **Filtering** | The event's path is checked against system file rules and user-defined regex patterns (`WithPath`, `WithIncRegex`, `WithExcRegex`). If it's a match for exclusion, it's dropped. |
-| **Debouncing** | The event is held for a configurable cooldown period (`WithCooldown`). If another event for the same path arrives during this time, the two events are merged into one. |
-| **Batching** | If enabled (`WithEventBatching`), the debounced event is held in a batch. The batch is released as a single `WatchEvent` after a configurable duration. |
+| **Debouncing** | The event is held for a configurable cooldown period (`WithCooldown`). If another event for the same path arrives during this time, they are aggregated into a single event containing all unique types and flags. The cooldown timer is reset on each new event. |
 | **User channel** | The final, clean `WatchEvent` is sent to the `Events()` channel for your application to consume. |
 
 This entire process ensures that your application receives high-quality, actionable events without the noise typically associated with raw file system notifications.
+
+## Event Aggregation
+
+FSWatcher uses an `EventAggregator` to handle the noise of many OS events. For example, when you save a file, the OS might emit multiple "Edit" and "Chmod" events in rapid succession.
+
+The `EventAggregator` works by:
+1.  **Deduplication:** Multiple events for the same path within the `WithCooldown` window are merged.
+2.  **Type Collection:** The final `WatchEvent` contains all unique `EventType` values that occurred during the window (e.g., if a file was created and then modified, you'll get one event with both `Create` and `Edit` types).
+3.  **Flag Collection:** All platform-specific flags are also collected and merged.
+4.  **Timer-based Flushing:** A path's aggregated event is only sent to the `Events()` channel after no new events for that path have been received for the duration of the cooldown.
 
 ## Project structure
 
@@ -191,8 +197,7 @@ The project is designed to be lightweight and easy to understand, with a clear s
 .
 ├── watcher.go                 # Core watcher logic and public API
 ├── options.go                 # Configuration options (functional pattern)
-├── event.go                   # Event definitions and batching logic
-├── debouncer.go               # Event debouncing component
+├── event.go                   # Event definitions and aggregation logic
 ├── filters.go                 # Path filtering logic
 ├── logs.go                    # Logging helpers
 ├── errors.go                  # Custom error types
@@ -256,7 +261,7 @@ func main() {
 
 **1. Why create another file watcher?**
 
-> FSWatcher was built to provide features like built-in debouncing, event batching, and powerful filtering out-of-the-box, which often require manual implementation in other libraries. It also uses a modern Go API with functional options and context-based lifecycle management.
+> FSWatcher was built to provide features like built-in debouncing and powerful filtering out-of-the-box, which often require manual implementation in other libraries. It also uses a modern Go API with functional options and context-based lifecycle management.
 
 **2. How does it handle a large number of files?**
 

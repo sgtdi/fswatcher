@@ -134,7 +134,7 @@ func setupEpoll(inotifyFD, eventFD int) (int, error) {
 // runInotifyLoop reads inotify events using epoll for efficiency and forwards them as WatchEvents
 func (w *watcher) runInotifyLoop(ctx context.Context, p *inotify, done chan struct{}) {
 	defer func() {
-		w.logDebug("inotify platform shutting down...")
+		w.logDebug("inotify platform shutting down")
 		p.mu.RLock()
 		var wds []int
 		for wd := range p.wds {
@@ -156,14 +156,14 @@ func (w *watcher) runInotifyLoop(ctx context.Context, p *inotify, done chan stru
 
 	eventFD, err := unix.Eventfd(0, unix.EFD_NONBLOCK|unix.EFD_CLOEXEC)
 	if err != nil {
-		w.logError("inotify eventfd error: %v", err)
+		w.logError("inotify eventfd error", "error", err)
 		return
 	}
 	defer unix.Close(eventFD)
 
 	epfd, err := setupEpoll(p.fd, eventFD)
 	if err != nil {
-		w.logError("inotify setup error: %v", err)
+		w.logError("inotify setup error", "error", err)
 		return
 	}
 	defer unix.Close(epfd)
@@ -205,7 +205,7 @@ func (w *watcher) runInotifyLoop(ctx context.Context, p *inotify, done chan stru
 				n, readErr := unix.Read(p.fd, buf)
 				if n <= 0 {
 					if readErr != nil && readErr != unix.EAGAIN {
-						w.logError("inotify read error: %v", readErr)
+						w.logError("inotify read error", "error", readErr)
 					}
 					continue
 				}
@@ -365,7 +365,7 @@ func (p *inotify) addWatch(w *watcher, watchPath *WatchPath) error {
 	p.mu.Unlock()
 
 	if watchPath.Depth == WatchTopLevel {
-		w.logDebug("Watching top-level only for %s", path)
+		w.logDebug("Watching top-level only", "path", path)
 		return nil
 	}
 
@@ -379,7 +379,7 @@ func (p *inotify) addWatch(w *watcher, watchPath *WatchPath) error {
 		wd2, err := unix.InotifyAddWatch(p.fd, subp, inotifyMask())
 		if err != nil {
 			if errors.Is(err, unix.ENOSPC) {
-				w.logWarn("inotify watch limit reached at %s", subp)
+				w.logWarn("inotify watch limit reached", "path", subp)
 				return fs.SkipDir
 			}
 			return nil

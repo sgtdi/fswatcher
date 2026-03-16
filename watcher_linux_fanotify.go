@@ -18,9 +18,10 @@ import (
 
 // fanotify is the fanotify platform implementation
 type fanotify struct {
-	fd    int
-	paths map[string]struct{}
-	mu    sync.RWMutex
+	fd         int
+	paths      map[string]struct{}
+	mountCache map[uint64]string // Cache for FSID to mount path resolution
+	mu         sync.RWMutex
 }
 
 // newFanotify tries to initialize fanotify with directory monitoring support
@@ -33,7 +34,11 @@ func newFanotify() (*fanotify, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fanotify init failed: %w", err)
 	}
-	return &fanotify{fd: fd, paths: make(map[string]struct{})}, nil
+	return &fanotify{
+		fd:         fd,
+		paths:      make(map[string]struct{}),
+		mountCache: make(map[uint64]string),
+	}, nil
 }
 
 // runFanotifyLoop reads fanotify events and forwards them as WatchEvents
@@ -111,7 +116,7 @@ func (w *watcher) runFanotifyLoop(ctx context.Context, p *fanotify, done chan st
 				unix.Close(int(meta.Fd))
 			} else if meta.Fd == unix.FAN_NOFD {
 				// Parse the additional info records to get the FID and Name
-				path, err = w.parseFanotifyInfo(buf[offset+unix.FAN_EVENT_METADATA_LEN : offset+int(meta.Event_len)])
+				path, err = w.parseFanotifyInfo(p, buf[offset+unix.FAN_EVENT_METADATA_LEN:offset+int(meta.Event_len)])
 			}
 
 			if err == nil && path != "" {
@@ -126,7 +131,7 @@ func (w *watcher) runFanotifyLoop(ctx context.Context, p *fanotify, done chan st
 }
 
 // parseFanotifyInfo parses the variable length info records to reconstructing the path
-func (w *watcher) parseFanotifyInfo(infoBuf []byte) (string, error) {
+func (w *watcher) parseFanotifyInfo(p *fanotify, infoBuf []byte) (string, error) {
 
 	var dirPath string
 	var fileName string
@@ -158,37 +163,50 @@ func (w *watcher) parseFanotifyInfo(infoBuf []byte) (string, error) {
 				continue
 			}
 
+			fsid := binary.LittleEndian.Uint64(record[headerSize : headerSize+fsidSize])
 			handleBytes := record[headerSize+fsidSize:]
-			if len(handleBytes) < 8 { // sizeof(uint32) * 2
-				offset += int(infoLen)
-				continue
+
+			// Try to resolve from cache first
+			p.mu.RLock()
+			cachedPath, exists := p.mountCache[fsid]
+			p.mu.RUnlock()
+
+			if exists {
+				dirPath = cachedPath
 			}
 
-			// Parse the C struct into Go's unix.FileHandle
-			fHandleBytes := binary.LittleEndian.Uint32(handleBytes[0:4])
-			fHandleType := int32(binary.LittleEndian.Uint32(handleBytes[4:8]))
+			if dirPath == "" && len(handleBytes) >= 8 {
+				// Parse the C struct into Go's unix.FileHandle
+				fHandleBytes := binary.LittleEndian.Uint32(handleBytes[0:4])
+				fHandleType := int32(binary.LittleEndian.Uint32(handleBytes[4:8]))
 
-			if len(handleBytes) < 8+int(fHandleBytes) {
-				offset += int(infoLen)
-				continue
+				if len(handleBytes) >= 8+int(fHandleBytes) {
+					opaqueHandle := handleBytes[8 : 8+int(fHandleBytes)]
+					fileHandle := unix.NewFileHandle(fHandleType, opaqueHandle)
+
+					fd, err := unix.OpenByHandleAt(unix.AT_FDCWD, fileHandle, unix.O_RDONLY|unix.O_PATH)
+					if err == nil {
+						// Recover path from FD
+						resolved, _ := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
+						unix.Close(fd)
+
+						if resolved != "" {
+							dirPath = resolved
+							// Store in cache for future events on this filesystem
+							p.mu.Lock()
+							p.mountCache[fsid] = resolved
+							p.mu.Unlock()
+						}
+					}
+				}
 			}
 
-			opaqueHandle := handleBytes[8 : 8+int(fHandleBytes)]
-			fileHandle := unix.NewFileHandle(fHandleType, opaqueHandle)
-
-			fd, err := unix.OpenByHandleAt(unix.AT_FDCWD, fileHandle, unix.O_RDONLY|unix.O_PATH)
-			if err == nil {
-				// Recover path from FD
-				dirPath, _ = os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
-				unix.Close(fd)
-			} else {
-				w.logDebug("OpenByHandleAt failed: %v", err)
-			}
 			if infoType == unix.FAN_EVENT_INFO_TYPE_DFID_NAME {
-				// Opaque bytes = 4 + 4 + fHandleBytes
+				// We need to skip the file handle struct to find the name
+				fHandleBytes := binary.LittleEndian.Uint32(handleBytes[0:4])
 				handleStructSize := 4 + 4 + int(fHandleBytes)
 
-				if len(handleBytes) >= handleStructSize {
+				if len(handleBytes) > handleStructSize {
 					// Name starts after the handle struct
 					nameBytes := handleBytes[handleStructSize:]
 					nullIdx := bytes.IndexByte(nameBytes, 0)

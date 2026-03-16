@@ -95,7 +95,7 @@ func (w *watcher) startPlatform(ctx context.Context) (<-chan struct{}, error) {
 // runWindowsLoop is the main event processing loop for Windows
 func (w *watcher) runWindowsLoop(iocp windows.Handle, done chan struct{}) {
 	defer func() {
-		w.logDebug("Windows platform shutting down...")
+		w.logDebug("Windows platform shutting down")
 		windows.Close(iocp)
 		close(done)
 	}()
@@ -134,19 +134,27 @@ func (w *watcher) runWindowsLoop(iocp windows.Handle, done chan struct{}) {
 		w.streamMu.Unlock()
 
 		if !ok {
-			w.logWarn("Received completion for unknown key: %d", key)
+			w.logWarn("Received completion for unknown key", "key", key)
 			continue
 		}
 
 		if bytesRead > 0 {
 			w.handleWindowsEvents(wp, bytesRead)
+		} else {
+			// bytesRead == 0 with no error indicates a buffer overflow
+			w.logWarn("Windows buffer overflow detected", "path", wp.path)
+			w.handlePlatformEvent(WatchEvent{
+				Path:  wp.path,
+				Types: []EventType{EventOverflow},
+				Time:  time.Now(),
+			})
 		}
 
 		// Reissue the read request to continue watching.
 		if err := w.readChanges(wp); err != nil {
 			// Happen if the directory is deleted
 			if err != windows.ERROR_INVALID_HANDLE {
-				w.logError("Failed to reissue read for %s: %v", wp.path, err)
+				w.logError("Failed to reissue read", "path", wp.path, "error", err)
 			}
 		}
 	}
@@ -238,7 +246,7 @@ func (w *watcher) addWatch(watchPath *WatchPath) error {
 
 	w.streams[path] = wp
 	pathMap[key] = wp
-	w.logInfo("Added watch for %s", path)
+	w.logInfo("Added watch", "path", path)
 	return nil
 }
 
@@ -256,7 +264,7 @@ func (w *watcher) removeWatch(path string) error {
 
 	// Try to cancel any pending I/O operations
 	if err := windows.CancelIoEx(wp.handle, &wp.overlapped); err != nil && err != windows.ERROR_NOT_FOUND {
-		w.logWarn("Failed to cancel I/O for %s: %v", path, err)
+		w.logWarn("Failed to cancel I/O", "path", path, "error", err)
 		// If we can't cancel the I/O, the state is uncertain abort
 		return err
 	}
@@ -264,13 +272,13 @@ func (w *watcher) removeWatch(path string) error {
 	// Close the handle
 	closeErr := windows.Close(wp.handle)
 	if closeErr != nil {
-		w.logWarn("Failed to close handle for %s: %v", path, closeErr)
+		w.logWarn("Failed to close handle", "path", path, "error", closeErr)
 	}
 
 	// Clean up internal state
 	delete(pathMap, wp.key)
 	delete(w.streams, path)
-	w.logInfo("Removed watch for %s", path)
+	w.logInfo("Removed watch", "path", path)
 
 	return closeErr
 }

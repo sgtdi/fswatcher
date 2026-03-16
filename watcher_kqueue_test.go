@@ -191,7 +191,7 @@ func TestProcessKqueueEvents(t *testing.T) {
 		},
 	}
 
-	// processKqueueEvents uses w.handlePlatformEvent which sends to w.events or w.batcher
+	// processKqueueEvents uses w.handlePlatformEvent which sends to w.events or w.aggregator
 	// We need to consume w.events
 	var wg sync.WaitGroup
 	wg.Add(1)

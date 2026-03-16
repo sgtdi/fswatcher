@@ -1,8 +1,7 @@
 package fswatcher
 
 import (
-	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,16 +53,6 @@ func TestWatcherOptions(t *testing.T) {
 		assert.Equal(t, expectedPatterns, w.excRegexPatterns)
 	})
 
-	t.Run("WithEventBatching", func(t *testing.T) {
-		w := &watcher{}
-		expectedDuration := 250 * time.Millisecond
-		opt := WithEventBatching(expectedDuration)
-
-		opt(w)
-
-		assert.Equal(t, expectedDuration, w.batchDuration)
-	})
-
 	t.Run("WithCustomChannels", func(t *testing.T) {
 		w := &watcher{ownsEventsChannel: true} // Start with the default
 		eventsChan := make(chan WatchEvent)
@@ -99,13 +88,12 @@ func TestWatcherOptions(t *testing.T) {
 
 	t.Run("WithLogFile", func(t *testing.T) {
 		t.Run("with empty path disables logger", func(t *testing.T) {
-			w := &watcher{logger: log.Default()}
+			w := &watcher{logPath: "something", logger: slog.Default()}
 			opt := WithLogFile("")
 
 			opt(w)
 
-			assert.Nil(t, w.logger)
-			assert.Nil(t, w.logFile)
+			assert.Equal(t, "", w.logPath)
 		})
 
 		t.Run("with stdout path", func(t *testing.T) {
@@ -114,8 +102,7 @@ func TestWatcherOptions(t *testing.T) {
 
 			opt(w)
 
-			require.NotNil(t, w.logger)
-			assert.Nil(t, w.logFile, "logFile handle should be nil for stdout")
+			assert.Equal(t, "stdout", w.logPath)
 		})
 
 		t.Run("with a valid file path", func(t *testing.T) {
@@ -125,44 +112,8 @@ func TestWatcherOptions(t *testing.T) {
 			opt := WithLogFile(logPath)
 
 			opt(w)
-			if w.logFile != nil {
-				defer func() { _ = w.logFile.Close() }()
-			}
 
-			require.NotNil(t, w.logger, "Logger should be configured")
-			require.NotNil(t, w.logFile, "logFile handle should be created")
-			assert.Equal(t, logPath, w.logFile.Name(), "The file name should match the provided path")
-		})
-
-		t.Run("with an invalid file path", func(t *testing.T) {
-			// Path invalid cause the directory doesn't exist
-			invalidPath := "/nonexistent/directory/test.log"
-
-			// Redirect stderr to silence the console output
-			origStderr := os.Stderr
-			r, wFile, _ := os.Pipe()
-			os.Stderr = wFile
-
-			mw := &mockWriter{}
-			w := &watcher{
-				logger:   log.New(mw, "", 0),
-				severity: SeverityDebug,
-			}
-			opt := WithLogFile(invalidPath)
-
-			opt(w)
-
-			// Restore stderr and discard its output
-			_ = wFile.Close()
-			os.Stderr = origStderr
-			_, _ = io.Copy(io.Discard, r)
-
-			assert.NotNil(t, w.logger, "Logger should not be changed on failure")
-			assert.Nil(t, w.logFile, "logFile handle should not be created on failure")
-
-			messages := mw.getMessages()
-			require.Len(t, messages, 1, "Expected one log message")
-			assert.Contains(t, messages[0], "failed to open log file")
+			assert.Equal(t, logPath, w.logPath)
 		})
 	})
 
