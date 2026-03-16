@@ -85,8 +85,7 @@ type watcher struct {
 	pathMu       sync.RWMutex
 
 	// Synchronization and logs
-	eventWg sync.WaitGroup
-	logMu   sync.Mutex
+	logMu sync.Mutex
 	logPath string
 	logFile *os.File
 	logger  *slog.Logger
@@ -283,8 +282,6 @@ func (w *watcher) Watch(ctx context.Context) error {
 	if w.ownsEventsChannel {
 		close(w.events)
 	}
-
-	w.eventWg.Wait()
 
 	if w.logFile != nil {
 		if err := w.logFile.Close(); err != nil {
