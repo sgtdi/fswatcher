@@ -283,13 +283,13 @@ func (w *watcher) Watch(ctx context.Context) error {
 		close(w.events)
 	}
 
+	w.logInfo("Watcher shutdown completed")
+
 	if w.logFile != nil {
 		if err := w.logFile.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "fswatcher: error closing log file: %v\n", err)
 		}
 	}
-
-	w.logInfo("Watcher shutdown completed")
 	return nil
 }
 

@@ -158,7 +158,16 @@ func WithPathExcRegex(patterns ...string) PathOption {
 	}
 }
 
-// WithEventMask specifies which event types to listen for on a specific path
+// WithEventMask restricts which event types are delivered for a specific watched path.
+// Only events whose type is in the mask will be forwarded to the Events() channel;
+// all other types are silently dropped for that path.
+// If no mask is set (the default), all event types are delivered.
+//
+// Example: only receive create and delete events for a directory:
+//
+//	fswatcher.WithPath("/var/data",
+//	    fswatcher.WithEventMask(fswatcher.EventCreate, fswatcher.EventRemove),
+//	)
 func WithEventMask(eventTypes ...EventType) PathOption {
 	return func(p *WatchPath) {
 		if p.eventMask == nil {

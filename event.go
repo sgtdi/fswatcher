@@ -200,8 +200,8 @@ func uniqueEventTypes(s []EventType) []EventType {
 		return s
 	}
 
-	// The max value is EventChmod (5)
-	const maxEventType = EventChmod + 1
+	// The max value is EventOverflow (6)
+	const maxEventType = EventOverflow + 1
 	var seen [maxEventType]bool
 
 	j := 0

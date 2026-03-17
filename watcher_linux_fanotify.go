@@ -16,12 +16,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const mountCacheMaxSize = 256
+
 // fanotify is the fanotify platform implementation
 type fanotify struct {
-	fd         int
-	paths      map[string]struct{}
-	mountCache map[uint64]string // Cache for FSID to mount path resolution
-	mu         sync.RWMutex
+	fd              int
+	paths           map[string]struct{}
+	mountCache      map[uint64]string // Cache for FSID to mount path resolution
+	mountCacheOrder []uint64          // FIFO insertion order for eviction
+	mu              sync.RWMutex
 }
 
 // newFanotify tries to initialize fanotify with directory monitoring support
@@ -202,6 +205,10 @@ func (w *watcher) parseFanotifyInfo(p *fanotify, infoBuf []byte) (string, error)
 			}
 
 			if infoType == unix.FAN_EVENT_INFO_TYPE_DFID_NAME {
+				if len(handleBytes) < 8 {
+					offset += int(infoLen)
+					continue
+				}
 				// We need to skip the file handle struct to find the name
 				fHandleBytes := binary.LittleEndian.Uint32(handleBytes[0:4])
 				handleStructSize := 4 + 4 + int(fHandleBytes)
