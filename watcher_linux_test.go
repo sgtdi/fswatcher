@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 // TestFanotify_Backend tests the fanotify backend initialization
@@ -153,4 +154,25 @@ func TestInotify_Backend(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "Should have received an event for the file using inotify")
+}
+
+func TestInotify_RemoveWatchCleansState(t *testing.T) {
+	dir := t.TempDir()
+
+	w, err := New()
+	require.NoError(t, err)
+	wImpl := w.(*watcher)
+
+	p, err := newInotify()
+	require.NoError(t, err)
+	defer unix.Close(p.fd)
+
+	wp, err := validateWatchPath(dir, WatchNested)
+	require.NoError(t, err)
+
+	require.NoError(t, p.addWatch(wImpl, wp))
+	require.NoError(t, p.removeWatch(wp.Path))
+
+	// Re-adding the same path must succeed after removal
+	require.NoError(t, p.addWatch(wImpl, wp))
 }

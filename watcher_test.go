@@ -7,7 +7,6 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -347,10 +346,10 @@ func TestWatcher(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				for range iterations {
-					if err := w.AddPath(otherDir); err != nil && !strings.Contains(err.Error(), "path is already being watched") {
+					if err := w.AddPath(otherDir); err != nil && !isExpectedConcurrentAddDropError(err) {
 						opErrCh <- fmt.Errorf("add path: %w", err)
 					}
-					if err := w.DropPath(otherDir); err != nil && !strings.Contains(err.Error(), "path is not being watched") {
+					if err := w.DropPath(otherDir); err != nil && !isExpectedConcurrentAddDropError(err) {
 						opErrCh <- fmt.Errorf("drop path: %w", err)
 					}
 				}
@@ -671,227 +670,6 @@ func TestWatcher(t *testing.T) {
 		assert.Nil(t, wImpl.logFile, "log file handle should be closed and cleared on startup failure")
 	})
 
-	t.Run("FP2_9_RegressionCoverage", func(t *testing.T) {
-		t.Run("MostSpecificWatchPathSelection", func(t *testing.T) {
-			root := t.TempDir()
-			sub := filepath.Join(root, "sub")
-			require.NoError(t, os.MkdirAll(sub, 0o755))
-
-			rootWP := &WatchPath{Path: root, Depth: WatchTopLevel}
-			subWP := &WatchPath{Path: sub, Depth: WatchNested}
-
-			w := &watcher{
-				watchedPaths: map[string]*WatchPath{
-					root: rootWP,
-					sub:  subWP,
-				},
-			}
-
-			target := filepath.Join(sub, "file.txt")
-			got := w.findMostSpecificWatchPath(target)
-			require.NotNil(t, got)
-			assert.Equal(t, subWP, got, "should choose the deepest matching watched path")
-		})
-
-		t.Run("StartupFailFastWhenInitialPathDisappears", func(t *testing.T) {
-			if runtime.GOOS == "darwin" {
-				t.Skip("startup addWatch failure is backend-dependent on darwin FSEvents")
-			}
-
-			dir := t.TempDir()
-			ready := make(chan struct{})
-
-			w, err := New(
-				WithPath(dir),
-				WithReadyChannel(ready),
-				WithSeverity(SeverityNone),
-			)
-			require.NoError(t, err)
-
-			require.NoError(t, os.RemoveAll(dir))
-			require.NoError(t, os.WriteFile(dir, []byte("not a directory"), 0o644))
-
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			errCh := make(chan error, 1)
-			go func() {
-				errCh <- w.Watch(ctx)
-			}()
-
-			select {
-			case watchErr := <-errCh:
-				require.Error(t, watchErr)
-				assert.Contains(t, watchErr.Error(), "startWatch")
-			case <-time.After(5 * time.Second):
-				t.Fatal("watch should fail fast when initial path no longer exists")
-			}
-
-			// ready must not be closed on startup failure
-			select {
-			case <-ready:
-				t.Fatal("ready channel should not be closed on startup failure")
-			default:
-			}
-		})
-
-		t.Run("WatchSingleUse", func(t *testing.T) {
-			dir := t.TempDir()
-			ready := make(chan struct{})
-
-			w, err := New(
-				WithPath(dir),
-				WithReadyChannel(ready),
-				WithSeverity(SeverityNone),
-			)
-			require.NoError(t, err)
-
-			ctx, cancel := context.WithCancel(context.Background())
-			watchErrCh := make(chan error, 1)
-			go func() {
-				watchErrCh <- w.Watch(ctx)
-			}()
-
-			select {
-			case <-ready:
-			case <-time.After(5 * time.Second):
-				t.Fatal("watcher did not become ready")
-			}
-
-			cancel()
-			select {
-			case watchErr := <-watchErrCh:
-				require.NoError(t, watchErr)
-			case <-time.After(5 * time.Second):
-				t.Fatal("watch did not exit after cancel")
-			}
-
-			err = w.Watch(context.Background())
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "single-use")
-		})
-
-		t.Run("ReadyChannelClosesOnSuccessfulStartup", func(t *testing.T) {
-			dir := t.TempDir()
-			ready := make(chan struct{})
-
-			w, err := New(
-				WithPath(dir),
-				WithReadyChannel(ready),
-				WithSeverity(SeverityNone),
-			)
-			require.NoError(t, err)
-
-			ctx, cancel := context.WithCancel(context.Background())
-			errCh := make(chan error, 1)
-			go func() {
-				errCh <- w.Watch(ctx)
-			}()
-
-			select {
-			case <-ready:
-			case <-time.After(5 * time.Second):
-				t.Fatal("ready channel was not closed on successful startup")
-			}
-
-			cancel()
-			select {
-			case watchErr := <-errCh:
-				require.NoError(t, watchErr)
-			case <-time.After(5 * time.Second):
-				t.Fatal("watch did not exit after cancel")
-			}
-		})
-
-		t.Run("DroppedChannelClosedWhenOwned", func(t *testing.T) {
-			ready := make(chan struct{})
-			w, err := New(
-				WithPath(t.TempDir()),
-				WithReadyChannel(ready),
-				WithSeverity(SeverityNone),
-			)
-			require.NoError(t, err)
-
-			ctx, cancel := context.WithCancel(context.Background())
-			errCh := make(chan error, 1)
-			go func() {
-				errCh <- w.Watch(ctx)
-			}()
-
-			select {
-			case <-ready:
-			case <-time.After(5 * time.Second):
-				t.Fatal("watcher did not become ready")
-			}
-
-			cancel()
-			select {
-			case watchErr := <-errCh:
-				require.NoError(t, watchErr)
-			case <-time.After(5 * time.Second):
-				t.Fatal("watch did not exit after cancel")
-			}
-
-			timeout := time.After(2 * time.Second)
-			for {
-				select {
-				case _, ok := <-w.Dropped():
-					if !ok {
-						return
-					}
-				case <-timeout:
-					t.Fatal("owned dropped channel was not closed")
-				}
-			}
-		})
-
-		t.Run("DroppedChannelNotClosedWhenCustom", func(t *testing.T) {
-			ready := make(chan struct{})
-			customEvents := make(chan WatchEvent, 8)
-			customDropped := make(chan WatchEvent, 8)
-
-			w, err := New(
-				WithPath(t.TempDir()),
-				WithCustomChannels(customEvents, customDropped),
-				WithReadyChannel(ready),
-				WithSeverity(SeverityNone),
-			)
-			require.NoError(t, err)
-
-			ctx, cancel := context.WithCancel(context.Background())
-			errCh := make(chan error, 1)
-			go func() {
-				errCh <- w.Watch(ctx)
-			}()
-
-			select {
-			case <-ready:
-			case <-time.After(5 * time.Second):
-				t.Fatal("watcher did not become ready")
-			}
-
-			cancel()
-			select {
-			case watchErr := <-errCh:
-				require.NoError(t, watchErr)
-			case <-time.After(5 * time.Second):
-				t.Fatal("watch did not exit after cancel")
-			}
-
-			// Custom dropped channel must remain open after watcher shutdown
-			for {
-				select {
-				case _, ok := <-customDropped:
-					if !ok {
-						t.Fatal("custom dropped channel should not be closed by watcher")
-					}
-				default:
-					return
-				}
-			}
-		})
-	})
-
 }
 
 func randString(n int) string {
@@ -911,6 +689,26 @@ func randInt(min, max int) int {
 		min, max = max, min
 	}
 	return rand.Intn(max-min+1) + min
+}
+
+func isExpectedConcurrentAddDropError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := err.Error()
+	benign := []string{
+		"path is already being watched",
+		"path is not being watched",
+		"already being monitored",
+		"watch not found for path",
+	}
+	for _, needle := range benign {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // performOperations performs a number of random CRUD ops

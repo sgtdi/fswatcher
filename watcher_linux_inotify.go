@@ -419,6 +419,21 @@ func (p *inotify) removeWatch(path string) error {
 		_, _ = unix.InotifyRmWatch(p.fd, uint32(wd))
 	}
 
+	p.mu.Lock()
+	for _, wd := range wdsToRemove {
+		delete(p.wds, wd)
+	}
+
+	// Rebuild trie from remaining watch descriptors to keep internal state consistent
+	newTrie := newPathTrieNode()
+	for wd, wp := range p.wds {
+		if wp == nil {
+			continue
+		}
+		newTrie.insert(wp.Path, wd)
+	}
+	p.trie = newTrie
+	p.mu.Unlock()
+
 	return nil
 }
-
