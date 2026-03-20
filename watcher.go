@@ -41,11 +41,11 @@ type WatcherStats struct {
 
 // watcherStats holds internal, mutable statistics
 type watcherStats struct {
-	startTime       time.Time
 	eventsProcessed int64
 	eventsDropped   int64
 	eventsFiltered  int64
 	eventsLost      int64
+	startTime       time.Time
 }
 
 // watcher implements the Watcher interface
@@ -56,15 +56,17 @@ type watcher struct {
 	// Atomic booleans
 	isRunning      atomic.Bool
 	isShuttingDown atomic.Bool
+	isUsed         atomic.Bool
 
 	// Configuration fields
-	init              error
-	cooldown          time.Duration
-	bufferSize        int
-	severity          Severity
-	ownsEventsChannel bool
-	incRegexPatterns  []string
-	excRegexPatterns  []string
+	init               error
+	cooldown           time.Duration
+	bufferSize         int
+	severity           Severity
+	ownsEventsChannel  bool
+	ownsDroppedChannel bool
+	incRegexPatterns   []string
+	excRegexPatterns   []string
 
 	// Linux fields
 	platformLinux PlatformLinux
@@ -83,6 +85,7 @@ type watcher struct {
 	paths        []*WatchPath
 	watchedPaths map[string]*WatchPath
 	pathMu       sync.RWMutex
+	opsMu        sync.Mutex
 
 	// Synchronization and logs
 	logMu   sync.Mutex
@@ -124,12 +127,13 @@ type Watcher interface {
 func New(options ...WatcherOpt) (Watcher, error) {
 	// Create a watcher with default values
 	w := &watcher{
-		done:              make(chan struct{}),
-		cooldown:          DefaultCooldown,
-		bufferSize:        DefaultBufferSize,
-		ownsEventsChannel: true,
-		severity:          SeverityWarn,
-		watchedPaths:      make(map[string]*WatchPath),
+		done:               make(chan struct{}),
+		cooldown:           DefaultCooldown,
+		bufferSize:         DefaultBufferSize,
+		ownsEventsChannel:  true,
+		ownsDroppedChannel: true,
+		severity:           SeverityWarn,
+		watchedPaths:       make(map[string]*WatchPath),
 	}
 
 	// Apply user-provided options
@@ -210,10 +214,26 @@ func compileRegex(patterns []string) ([]*regexp.Regexp, error) {
 }
 
 // Watch starts the main event loop for the watcher
-func (w *watcher) Watch(ctx context.Context) error {
+func (w *watcher) Watch(ctx context.Context) (retErr error) {
+	if !w.isUsed.CompareAndSwap(false, true) {
+		return newError("start", "", errors.New("watcher is single-use; create a new watcher instance"))
+	}
+
 	if err := w.initLogger(); err != nil {
 		return err
 	}
+	startup := false
+	defer func() {
+		if retErr == nil || startup {
+			return
+		}
+		w.logMu.Lock()
+		defer w.logMu.Unlock()
+		if w.logFile != nil {
+			_ = w.logFile.Close()
+			w.logFile = nil
+		}
+	}()
 
 	if err := w.validateConfig(); err != nil {
 		return newError("config", "", err)
@@ -254,8 +274,8 @@ func (w *watcher) Watch(ctx context.Context) error {
 		return err
 	}
 
-	// Start watching the initial set of paths synchronously.
-	// If any path fails to initialize, fail fast and return an error.
+	// Start watching the initial set of paths synchronously
+	// If any path fails to initialize, fail fast and return an error
 	w.pathMu.RLock()
 	initialPaths := make([]*WatchPath, 0, len(w.watchedPaths))
 	for _, wp := range w.watchedPaths {
@@ -274,6 +294,7 @@ func (w *watcher) Watch(ctx context.Context) error {
 	if w.readyChan != nil {
 		close(w.readyChan)
 	}
+	startup = true
 
 	// Wait for the context to be canceled
 	<-watchCtx.Done()
@@ -291,6 +312,9 @@ func (w *watcher) Watch(ctx context.Context) error {
 	if w.ownsEventsChannel {
 		close(w.events)
 	}
+	if w.ownsDroppedChannel {
+		close(w.dropped)
+	}
 
 	w.logInfo("Watcher shutdown completed")
 
@@ -307,6 +331,8 @@ func (w *watcher) AddPath(path string, options ...PathOption) error {
 	if !w.IsRunning() {
 		return newError("AddPath", path, errors.New("watcher is not running"))
 	}
+	w.opsMu.Lock()
+	defer w.opsMu.Unlock()
 
 	// Create a temporary WatchPath to apply options
 	watchPath := &WatchPath{Path: path, Depth: WatchNested}
@@ -336,7 +362,7 @@ func (w *watcher) AddPath(path string, options ...PathOption) error {
 		w.pathMu.Unlock()
 		return newError("AddPath", wp.Path, errors.New("path is already being watched"))
 	}
-	// Reserve first so concurrent AddPath calls for the same path are deterministic.
+	// Reserve first so concurrent AddPath calls for the same path are deterministic
 	w.watchedPaths[wp.Path] = wp
 	w.pathMu.Unlock()
 
@@ -356,6 +382,8 @@ func (w *watcher) DropPath(path string) error {
 	if !w.IsRunning() {
 		return newError("DropPath", path, errors.New("watcher is not running"))
 	}
+	w.opsMu.Lock()
+	defer w.opsMu.Unlock()
 
 	wp, err := validateWatchPath(path, WatchNested) // Depth doesn't matter for removal
 	if err != nil {
@@ -367,18 +395,22 @@ func (w *watcher) DropPath(path string) error {
 		w.pathMu.Unlock()
 		return newError("DropPath", path, errors.New("path is not being watched"))
 	}
-	delete(w.watchedPaths, wp.Path)
 	w.pathMu.Unlock()
 
 	if err := w.removeWatch(wp.Path); err != nil {
 		w.logError("Platform backend failed to remove watch", "path", wp.Path, "error", err)
+		return err
 	}
+
+	w.pathMu.Lock()
+	delete(w.watchedPaths, wp.Path)
+	w.pathMu.Unlock()
 
 	w.logInfo("Successfully removed watch path", "path", wp.Path)
 	return nil
 }
 
-// Events returns the event channel.
+// Events returns the event channel
 func (w *watcher) Events() <-chan WatchEvent {
 	return w.events
 }
@@ -424,13 +456,29 @@ func (w *watcher) Paths() []string {
 
 // Log handles leveled logging
 func (w *watcher) Log(level Severity, msg string, args ...any) {
-	w.log(level, msg, args...)
+	switch level {
+	case SeverityError:
+		w.logError(msg, args...)
+	case SeverityWarn:
+		w.logWarn(msg, args...)
+	case SeverityInfo:
+		w.logInfo(msg, args...)
+	case SeverityDebug:
+		w.logDebug(msg, args...)
+	default:
+		if w.logger != nil {
+			w.logger.Log(nil, slog.Level(level), msg, args...)
+		}
+	}
 }
 
 // Close gracefully shuts down the watcher
 func (w *watcher) Close() {
+	if !w.IsRunning() {
+		return
+	}
 	if w.isShuttingDown.CompareAndSwap(false, true) {
-		w.log(SeverityInfo, "Close called, initiating shutdown...")
+		w.logInfo("Close called, initiating shutdown...")
 		close(w.done)
 	}
 }
@@ -586,7 +634,7 @@ func (w *watcher) resetBackoff(state *backoffState) {
 	state.duration = 10 * time.Millisecond
 }
 
-// findMostSpecificWatchPath resolves the most specific watched root for a path.
+// findMostSpecificWatchPath resolves the most specific watched root for a path
 func (w *watcher) findMostSpecificWatchPath(path string) *WatchPath {
 	w.pathMu.RLock()
 	defer w.pathMu.RUnlock()
