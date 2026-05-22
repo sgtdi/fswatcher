@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -174,7 +175,7 @@ func (w *watcher) runInotifyLoop(ctx context.Context, p *inotify, done chan stru
 		_, _ = unix.Write(eventFD, (*(*[8]byte)(unsafe.Pointer(&val)))[:])
 	}()
 
-	buf := make([]byte, w.bufferSize)
+	buf := make([]byte, w.readBufferSize)
 	epollEvents := make([]unix.EpollEvent, 2) // Waiting on two FDs: inotify and eventfd
 	backoff := newBackoffState()
 
@@ -383,14 +384,20 @@ func (p *inotify) addWatch(w *watcher, watchPath *WatchPath) error {
 		wd2, err := unix.InotifyAddWatch(p.fd, subp, inotifyMask())
 		if err != nil {
 			if errors.Is(err, unix.ENOSPC) {
+				atomic.AddInt64(&w.stats.eventsPartial, 1)
 				w.logWarn("inotify watch limit reached", "path", subp)
 				return fs.SkipDir
 			}
 			return nil
 		}
 		p.mu.Lock()
-		// Sub-watches are always nested
-		p.wds[wd2] = &WatchPath{Path: subp, Depth: WatchNested}
+		// Sub-watches inherit path-specific filtering from the watched root.
+		p.wds[wd2] = &WatchPath{
+			Path:      subp,
+			Depth:     WatchNested,
+			filter:    watchPath.filter,
+			eventMask: watchPath.eventMask,
+		}
 		p.trie.insert(subp, wd2)
 		p.mu.Unlock()
 		return nil

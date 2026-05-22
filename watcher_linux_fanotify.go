@@ -125,8 +125,7 @@ func (w *watcher) runFanotifyLoop(ctx context.Context, p *fanotify, done chan st
 		_, _ = unix.Write(eventFD, (*(*[8]byte)(unsafe.Pointer(&val)))[:])
 	}()
 
-	const bufSize = 64 * 1024
-	buf := make([]byte, bufSize)
+	buf := make([]byte, w.readBufferSize)
 	backoff := newBackoffState()
 	pollFds := []unix.PollFd{
 		{Fd: int32(p.fd), Events: unix.POLLIN},
@@ -258,17 +257,11 @@ func (w *watcher) parseFanotifyInfo(p *fanotify, infoBuf []byte) (string, error)
 					opaqueHandle := handleBytes[8 : 8+int(fHandleBytes)]
 					fileHandle := unix.NewFileHandle(fHandleType, opaqueHandle)
 
-					fd, err := unix.OpenByHandleAt(unix.AT_FDCWD, fileHandle, unix.O_RDONLY|unix.O_PATH)
-					if err == nil {
-						// Recover path from FD
-						resolved, _ := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
-						unix.Close(fd)
-
-						if resolved != "" {
-							dirPath = resolved
-							// Store in cache for future events on this filesystem
-							p.setMountCache(fsid, resolved)
-						}
+					resolved, err := p.resolveHandlePath(fsid, fileHandle)
+					if err == nil && resolved != "" {
+						dirPath = resolved
+						// Store in cache for future events on this filesystem.
+						p.setMountCache(fsid, resolved)
 					}
 				}
 			}
@@ -304,6 +297,51 @@ func (w *watcher) parseFanotifyInfo(p *fanotify, infoBuf []byte) (string, error)
 	}
 
 	return "", fmt.Errorf("could not resolve path from handle")
+}
+
+func (p *fanotify) watchedPathsSnapshot(fsid uint64) []string {
+	p.mu.RLock()
+	paths := make([]string, 0, len(p.paths)+1)
+	if cached, ok := p.mountCache[fsid]; ok {
+		paths = append(paths, cached)
+	}
+	for path := range p.paths {
+		if path != "" && path != p.mountCache[fsid] {
+			paths = append(paths, path)
+		}
+	}
+	p.mu.RUnlock()
+	return paths
+}
+
+func (p *fanotify) resolveHandlePath(fsid uint64, fileHandle unix.FileHandle) (string, error) {
+	var lastErr error
+	for _, mountPath := range p.watchedPathsSnapshot(fsid) {
+		mountFD, err := unix.Open(mountPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		fd, err := unix.OpenByHandleAt(mountFD, fileHandle, unix.O_RDONLY|unix.O_PATH)
+		_ = unix.Close(mountFD)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		resolved, readErr := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
+		_ = unix.Close(fd)
+		if readErr != nil {
+			lastErr = readErr
+			continue
+		}
+		return resolved, nil
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", fmt.Errorf("no watched mount path available for fsid %d", fsid)
 }
 
 func (w *watcher) dispatchFanotifyEvent(path string, mask uint64) {
