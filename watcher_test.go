@@ -65,6 +65,19 @@ func TestMain(m *testing.M) {
 }
 
 func TestWatcher(t *testing.T) {
+	t.Run("InvalidBufferSizeReturnsError", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			w, err := New(WithPath(tempDir), WithBufferSize(0))
+			assert.Nil(t, w)
+			assert.Error(t, err)
+		})
+	})
+
+	t.Run("InvalidReadBufferSizeReturnsError", func(t *testing.T) {
+		w, err := New(WithPath(tempDir), WithReadBufferSize(0))
+		assert.Nil(t, w)
+		assert.Error(t, err)
+	})
 
 	t.Run("Watch", func(t *testing.T) {
 		readyChan := make(chan struct{})
@@ -651,23 +664,18 @@ func TestWatcher(t *testing.T) {
 		}
 	})
 
-	t.Run("WatchStartupErrorClosesLogFile", func(t *testing.T) {
-		startup := t.TempDir()
-		logPath := filepath.Join(startup, "watcher.log")
+	t.Run("InvalidConfigDoesNotOpenLogFile", func(t *testing.T) {
+		logPath := filepath.Join(t.TempDir(), "watcher.log")
 		w, err := New(
-			WithPath(startup),
+			WithPath(tempDir),
 			WithLogFile(logPath),
-			WithBufferSize(0), // invalid config -> Watch fails after initLogger
+			WithBufferSize(0),
 			WithSeverity(SeverityInfo),
 		)
-		require.NoError(t, err)
 
-		err = w.Watch(context.Background())
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "config")
-
-		wImpl := w.(*watcher)
-		assert.Nil(t, wImpl.logFile, "log file handle should be closed and cleared on startup failure")
+		assert.Nil(t, w)
+		assert.NoFileExists(t, logPath)
 	})
 
 }

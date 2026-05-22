@@ -118,3 +118,21 @@ func TestLogger_LevelFiltering(t *testing.T) {
 	assert.Contains(t, buf.String(), "level=INFO msg=\"should be logged\"")
 	assert.NotContains(t, buf.String(), "should be ignored")
 }
+
+func TestLogger_InitDisabled(t *testing.T) {
+	t.Run("empty log path disables logger", func(t *testing.T) {
+		w := &watcher{logPath: "", severity: SeverityWarn}
+
+		assert.NoError(t, w.initLogger())
+		assert.Nil(t, w.logger)
+		assert.Nil(t, w.logFile)
+	})
+
+	t.Run("severity none disables logger even with stdout", func(t *testing.T) {
+		w := &watcher{logPath: "stdout", severity: SeverityNone}
+
+		assert.NoError(t, w.initLogger())
+		assert.Nil(t, w.logger)
+		assert.Nil(t, w.logFile)
+	})
+}

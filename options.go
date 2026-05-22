@@ -26,6 +26,13 @@ func WithBufferSize(size int) WatcherOpt {
 	}
 }
 
+// WithReadBufferSize sets the size of the internal OS read buffer used by native backends.
+func WithReadBufferSize(size int) WatcherOpt {
+	return func(w *watcher) {
+		w.readBufferSize = size
+	}
+}
+
 // WithIncRegex sets the regex patterns for paths to include
 // If no patterns are provided, all non-excluded paths are included
 func WithIncRegex(patterns ...string) WatcherOpt {
@@ -44,10 +51,14 @@ func WithExcRegex(patterns ...string) WatcherOpt {
 // WithCustomChannels allows providing external channels for events
 func WithCustomChannels(events chan WatchEvent, dropped chan WatchEvent) WatcherOpt {
 	return func(w *watcher) {
-		w.events = events
-		w.dropped = dropped
-		w.ownsEventsChannel = false
-		w.ownsDroppedChannel = false
+		if events != nil {
+			w.events = events
+			w.ownsEventsChannel = false
+		}
+		if dropped != nil {
+			w.dropped = dropped
+			w.ownsDroppedChannel = false
+		}
 	}
 }
 

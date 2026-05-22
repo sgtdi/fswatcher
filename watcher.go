@@ -16,14 +16,16 @@ import (
 
 // Default values for watcher config
 const (
-	DefaultCooldown   = 100 * time.Millisecond
-	DefaultBufferSize = 4096
+	DefaultCooldown       = 100 * time.Millisecond
+	DefaultBufferSize     = 4096
+	DefaultReadBufferSize = 64 * 1024
 )
 
 // Limits and validation constants
 const (
 	MaxCooldownDuration   = 10 * time.Second
 	MaxBufferSize         = 256 * 1024
+	MaxReadBufferSize     = 1024 * 1024
 	MinDroppedBuffer      = 16
 	MaxDroppedBufferRatio = 4
 )
@@ -36,6 +38,7 @@ type WatcherStats struct {
 	EventsDropped   int64         // EventsDropped is the count of events sent to the Dropped channel
 	EventsFiltered  int64         // EventsFiltered is the count of events ignored by filters or debouncing
 	EventsLost      int64         // EventsLost is the count of events lost when all channels were full
+	EventsPartial   int64         // EventsPartial is the count of partial backend registrations
 	ProcessingRate  float64       // ProcessingRate is the number of events processed per second
 }
 
@@ -45,6 +48,7 @@ type watcherStats struct {
 	eventsDropped   int64
 	eventsFiltered  int64
 	eventsLost      int64
+	eventsPartial   int64
 	startTime       time.Time
 }
 
@@ -62,6 +66,7 @@ type watcher struct {
 	init               error
 	cooldown           time.Duration
 	bufferSize         int
+	readBufferSize     int
 	severity           Severity
 	ownsEventsChannel  bool
 	ownsDroppedChannel bool
@@ -76,6 +81,7 @@ type watcher struct {
 	dropped   chan WatchEvent
 	done      chan struct{}
 	readyChan chan struct{}
+	scanCtx   context.Context
 
 	// Components
 	aggregator *EventAggregator
@@ -130,6 +136,7 @@ func New(options ...WatcherOpt) (Watcher, error) {
 		done:               make(chan struct{}),
 		cooldown:           DefaultCooldown,
 		bufferSize:         DefaultBufferSize,
+		readBufferSize:     DefaultReadBufferSize,
 		ownsEventsChannel:  true,
 		ownsDroppedChannel: true,
 		severity:           SeverityWarn,
@@ -146,6 +153,10 @@ func New(options ...WatcherOpt) (Watcher, error) {
 	// Check for any initialization errors from options
 	if w.init != nil {
 		return nil, w.init
+	}
+
+	if err := w.validateConfig(); err != nil {
+		return nil, newError("config", "", err)
 	}
 
 	// If no path is specified, use the current working directory
@@ -235,10 +246,6 @@ func (w *watcher) Watch(ctx context.Context) (retErr error) {
 		}
 	}()
 
-	if err := w.validateConfig(); err != nil {
-		return newError("config", "", err)
-	}
-
 	if w.severity <= SeverityDebug {
 		w.logDebug("Watcher configuration",
 			"cooldown", w.cooldown,
@@ -259,6 +266,7 @@ func (w *watcher) Watch(ctx context.Context) (retErr error) {
 
 	watchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	w.scanCtx = watchCtx
 
 	go func() {
 		select {
@@ -429,6 +437,7 @@ func (w *watcher) Stats() WatcherStats {
 		EventsDropped:   atomic.LoadInt64(&w.stats.eventsDropped),
 		EventsFiltered:  atomic.LoadInt64(&w.stats.eventsFiltered),
 		EventsLost:      atomic.LoadInt64(&w.stats.eventsLost),
+		EventsPartial:   atomic.LoadInt64(&w.stats.eventsPartial),
 	}
 
 	// Add calculated fields
@@ -488,6 +497,9 @@ func (w *watcher) validateConfig() error {
 	if w.bufferSize <= 0 || w.bufferSize > MaxBufferSize {
 		return fmt.Errorf("buffer size must be between 1 and %d", MaxBufferSize)
 	}
+	if w.readBufferSize <= 0 || w.readBufferSize > MaxReadBufferSize {
+		return fmt.Errorf("read buffer size must be between 1 and %d", MaxReadBufferSize)
+	}
 	if w.cooldown < 0 || w.cooldown > MaxCooldownDuration {
 		return fmt.Errorf("cooldown must be between 0 and %v", MaxCooldownDuration)
 	}
@@ -499,7 +511,7 @@ func (w *watcher) initLogger() error {
 	w.logMu.Lock()
 	defer w.logMu.Unlock()
 
-	if w.logPath == "" && w.severity == SeverityNone {
+	if w.severity == SeverityNone || w.logPath == "" {
 		w.logger = nil
 		w.logFile = nil
 		return nil
@@ -510,7 +522,7 @@ func (w *watcher) initLogger() error {
 	}
 
 	var handler slog.Handler
-	if w.logPath == "stdout" || w.logPath == "" {
+	if w.logPath == "stdout" {
 		handler = slog.NewTextHandler(os.Stdout, opts)
 	} else {
 		file, err := os.OpenFile(w.logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -564,7 +576,17 @@ func (w *watcher) scanDirectory(path string) {
 
 	w.logInfo("Starting manual scan of directory", "path", path)
 
-	err := filepath.Walk(path, func(filePath string, info os.FileInfo, err error) error {
+	ctx := w.scanCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	const scanYieldEvery = 512
+	scanned := 0
+	err := filepath.WalkDir(path, func(filePath string, d os.DirEntry, err error) error {
+		if ctx.Err() != nil || w.isShuttingDown.Load() {
+			return filepath.SkipAll
+		}
 		if err != nil {
 			return nil // Skip files with errors
 		}
@@ -572,6 +594,16 @@ func (w *watcher) scanDirectory(path string) {
 		// Don't emit event for the root path being scanned
 		if filePath == path {
 			return nil
+		}
+
+		scanned++
+		if scanned%scanYieldEvery == 0 {
+			select {
+			case <-ctx.Done():
+				return filepath.SkipAll
+			default:
+				time.Sleep(time.Millisecond)
+			}
 		}
 
 		// Emit a generic Mod event for everything found
@@ -583,7 +615,7 @@ func (w *watcher) scanDirectory(path string) {
 		})
 
 		// If it's a directory and we are not recursive, don't walk into it
-		if info.IsDir() {
+		if d.IsDir() {
 			parentWatch := w.findMostSpecificWatchPath(filePath)
 
 			if parentWatch != nil && parentWatch.Depth == WatchTopLevel {

@@ -33,6 +33,16 @@ func TestWatcherOptions(t *testing.T) {
 		assert.Equal(t, expectedSize, w.bufferSize)
 	})
 
+	t.Run("WithReadBufferSize", func(t *testing.T) {
+		w := &watcher{}
+		expectedSize := 64 * 1024
+		opt := WithReadBufferSize(expectedSize)
+
+		opt(w)
+
+		assert.Equal(t, expectedSize, w.readBufferSize)
+	})
+
 	t.Run("WithIncRegex", func(t *testing.T) {
 		w := &watcher{}
 		expectedPatterns := []string{`\.go$`, `\.mod$`}
@@ -54,7 +64,7 @@ func TestWatcherOptions(t *testing.T) {
 	})
 
 	t.Run("WithCustomChannels", func(t *testing.T) {
-		w := &watcher{ownsEventsChannel: true} // Start with the default
+		w := &watcher{ownsEventsChannel: true, ownsDroppedChannel: true} // Start with the default
 		eventsChan := make(chan WatchEvent)
 		droppedChan := make(chan WatchEvent)
 		opt := WithCustomChannels(eventsChan, droppedChan)
@@ -64,6 +74,19 @@ func TestWatcherOptions(t *testing.T) {
 		assert.Equal(t, eventsChan, w.events, "Events channel should be set to the custom one")
 		assert.Equal(t, droppedChan, w.dropped, "Dropped channel should be set to the custom one")
 		assert.False(t, w.ownsEventsChannel, "ownsEventsChannel should be set to false")
+		assert.False(t, w.ownsDroppedChannel, "ownsDroppedChannel should be set to false")
+	})
+
+	t.Run("WithCustomChannels nil channels keep ownership", func(t *testing.T) {
+		w := &watcher{ownsEventsChannel: true, ownsDroppedChannel: true}
+		opt := WithCustomChannels(nil, nil)
+
+		opt(w)
+
+		assert.Nil(t, w.events)
+		assert.Nil(t, w.dropped)
+		assert.True(t, w.ownsEventsChannel)
+		assert.True(t, w.ownsDroppedChannel)
 	})
 
 	t.Run("WithReadyChannel", func(t *testing.T) {
