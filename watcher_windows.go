@@ -62,6 +62,7 @@ type watchedPath struct {
 	key        uintptr
 	buffer     []byte // buffer must be aligned to a 64-bit boundary
 	overlapped windows.Overlapped
+	recursive  bool
 }
 
 // startPlatform initializes the Windows watcher backend
@@ -92,7 +93,17 @@ func (w *watcher) startPlatform(ctx context.Context) (<-chan struct{}, error) {
 func (w *watcher) runWindowsLoop(iocp windows.Handle, done chan struct{}) {
 	defer func() {
 		w.logDebug("Windows platform shutting down")
-		windows.Close(iocp)
+		w.streamMu.Lock()
+		if pathMap, ok := w.streams["pathMap"].(map[uintptr]*watchedPath); ok {
+			for key, wp := range pathMap {
+				_ = windows.CancelIoEx(wp.handle, &wp.overlapped)
+				_ = windows.Close(wp.handle)
+				delete(pathMap, key)
+				delete(w.streams, wp.path)
+			}
+		}
+		w.streamMu.Unlock()
+		_ = windows.Close(iocp)
 		close(done)
 	}()
 
@@ -222,12 +233,13 @@ func (w *watcher) addWatch(watchPath *WatchPath) error {
 	}
 
 	// Allocate a uint64 slice to ensure 8-byte alignment, then slice it as bytes
-	alignedBuf := make([]uint64, (w.bufferSize+7)/8)
+	alignedBuf := make([]uint64, (w.readBufferSize+7)/8)
 	wp := &watchedPath{
-		handle: handle,
-		path:   path,
-		key:    key,
-		buffer: unsafe.Slice((*byte)(unsafe.Pointer(&alignedBuf[0])), len(alignedBuf)*8),
+		handle:    handle,
+		path:      path,
+		key:       key,
+		buffer:    unsafe.Slice((*byte)(unsafe.Pointer(&alignedBuf[0])), len(alignedBuf)*8),
+		recursive: watchPath.Depth != WatchTopLevel,
 	}
 
 	if _, err := windows.CreateIoCompletionPort(handle, iocp, key, 0); err != nil {
@@ -284,7 +296,7 @@ func (w *watcher) readChanges(wp *watchedPath) error {
 	return readDirectoryChangesW(
 		wp.handle,
 		wp.buffer,
-		true, // Watch subtrees
+		wp.recursive,
 		windows.FILE_NOTIFY_CHANGE_FILE_NAME|
 			windows.FILE_NOTIFY_CHANGE_DIR_NAME|
 			windows.FILE_NOTIFY_CHANGE_ATTRIBUTES|
