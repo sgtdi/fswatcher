@@ -65,3 +65,7 @@ func TestWatcher_Darwin(t *testing.T) {
 	assert.Contains(t, []string{testFile, tempDir}, event.Path)
 	assert.Contains(t, event.Types, EventCreate)
 }
+
+func TestIsSystemFile_DarwinAppleDouble(t *testing.T) {
+	assert.True(t, isSystemFile("/tmp/._document.txt"))
+}

@@ -9,8 +9,8 @@ import (
 )
 
 // Darwin system files used by isSystemFile
-var osPrefixes = []string{"~", ".DS_Store", ".localized", ".Trash", ".Trashes"}
-var osSuffixes = []string{".tmp", ".bak", ".swp", ".swo", "._", "~", ".plist", ".download", ".part"}
+var osPrefixes = []string{"~", "._", ".DS_Store", ".localized", ".Trash", ".Trashes"}
+var osSuffixes = []string{".tmp", ".bak", ".swp", ".swo", "~", ".plist", ".download", ".part"}
 
 // kqueueOpenFlags is the flag used to open files for kqueue monitoring on macOS
 const kqueueOpenFlags = unix.O_EVTONLY
