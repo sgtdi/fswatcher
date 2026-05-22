@@ -169,6 +169,37 @@ func TestEventAggregator(t *testing.T) {
 		}
 	})
 
+	t.Run("StaleGenerationDoesNotFlushUpdatedEvent", func(t *testing.T) {
+		events := make(chan WatchEvent, 10)
+		w := &watcher{events: events}
+		ea := newEventAggregator(w, time.Hour)
+		defer ea.close()
+
+		path := "/test/file.txt"
+		ea.addEvent(WatchEvent{Path: path, Types: []EventType{EventCreate}})
+
+		ea.mu.Lock()
+		staleVersion := ea.events[path].version
+		ea.mu.Unlock()
+
+		ea.addEvent(WatchEvent{Path: path, Types: []EventType{EventMod}})
+		ea.flushPath(path, staleVersion, false)
+
+		if len(events) != 0 {
+			t.Fatal("stale generation flushed an updated event")
+		}
+
+		ea.close()
+		select {
+		case ev := <-events:
+			if !slices.Contains(ev.Types, EventCreate) || !slices.Contains(ev.Types, EventMod) {
+				t.Fatalf("expected merged event after forced close flush, got %v", ev.Types)
+			}
+		default:
+			t.Fatal("expected forced close flush to deliver updated event")
+		}
+	})
+
 	t.Run("EventIDTracking", func(t *testing.T) {
 		events := make(chan WatchEvent, 10)
 		w := &watcher{events: events}

@@ -60,6 +60,9 @@ type EventAggregator struct {
 	watcher  *watcher
 	mu       sync.Mutex
 	isClosed atomic.Bool
+	started  atomic.Bool
+	wake     chan struct{}
+	done     chan struct{}
 }
 
 // aggregatedEvent holds merged data for events on the same path
@@ -69,7 +72,8 @@ type aggregatedEvent struct {
 	flags    map[string]struct{}
 	lastSeen time.Time
 	eventID  uint64
-	timer    *time.Timer
+	deadline time.Time
+	version  uint64
 }
 
 // newEventAggregator creates a new event aggregator
@@ -78,6 +82,8 @@ func newEventAggregator(w *watcher, cooldown time.Duration) *EventAggregator {
 		events:   make(map[string]*aggregatedEvent),
 		cooldown: cooldown,
 		watcher:  w,
+		wake:     make(chan struct{}, 1),
+		done:     make(chan struct{}),
 	}
 }
 
@@ -86,21 +92,22 @@ func (ea *EventAggregator) addEvent(event WatchEvent) {
 	if ea.isClosed.Load() {
 		return
 	}
+	if ea.started.CompareAndSwap(false, true) {
+		go ea.run()
+	}
 
 	ea.mu.Lock()
 	defer ea.mu.Unlock()
 
 	now := time.Now()
+	deadline := now.Add(ea.cooldown)
 
 	existing, exists := ea.events[event.Path]
 	if exists {
-		// Stop the existing timer
-		if existing.timer != nil {
-			existing.timer.Stop()
-		}
-
 		// Update existing event
 		existing.lastSeen = now
+		existing.deadline = deadline
+		existing.version++
 		if event.ID > existing.eventID {
 			existing.eventID = event.ID
 		}
@@ -128,19 +135,113 @@ func (ea *EventAggregator) addEvent(event WatchEvent) {
 			flags:    flags,
 			lastSeen: now,
 			eventID:  event.ID,
+			deadline: deadline,
+			version:  1,
 		}
 		ea.events[event.Path] = existing
 	}
 
-	// Schedule or reschedule the flush for this specific path
-	path := event.Path
-	existing.timer = time.AfterFunc(ea.cooldown, func() {
-		ea.flushPath(path, false)
-	})
+	ea.signal()
+}
+
+func (ea *EventAggregator) signal() {
+	select {
+	case ea.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (ea *EventAggregator) run() {
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	for {
+		next, ok := ea.nextDeadline()
+		if !ok {
+			if timer != nil {
+				timer.Stop()
+				timer = nil
+				timerC = nil
+			}
+			select {
+			case <-ea.wake:
+				continue
+			case <-ea.done:
+				return
+			}
+		}
+
+		delay := time.Until(next)
+		if delay <= 0 {
+			ea.flushDue(time.Now())
+			continue
+		}
+		if timer == nil {
+			timer = time.NewTimer(delay)
+		} else {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(delay)
+		}
+		timerC = timer.C
+
+		select {
+		case <-timerC:
+			ea.flushDue(time.Now())
+		case <-ea.wake:
+		case <-ea.done:
+			if timer != nil {
+				timer.Stop()
+			}
+			return
+		}
+	}
+}
+
+func (ea *EventAggregator) nextDeadline() (time.Time, bool) {
+	ea.mu.Lock()
+	defer ea.mu.Unlock()
+
+	var next time.Time
+	for _, event := range ea.events {
+		if next.IsZero() || event.deadline.Before(next) {
+			next = event.deadline
+		}
+	}
+	return next, !next.IsZero()
+}
+
+func (ea *EventAggregator) flushDue(now time.Time) {
+	var ready []struct {
+		path    string
+		version uint64
+	}
+
+	ea.mu.Lock()
+	if ea.isClosed.Load() {
+		ea.mu.Unlock()
+		return
+	}
+	for path, event := range ea.events {
+		if !event.deadline.After(now) {
+			ready = append(ready, struct {
+				path    string
+				version uint64
+			}{path: path, version: event.version})
+		}
+	}
+	ea.mu.Unlock()
+
+	for _, item := range ready {
+		ea.flushPath(item.path, item.version, false)
+	}
 }
 
 // flushPath sends a single aggregated event and removes it from the map
-func (ea *EventAggregator) flushPath(path string, force bool) {
+func (ea *EventAggregator) flushPath(path string, version uint64, force bool) {
 	ea.mu.Lock()
 	if !force && ea.isClosed.Load() {
 		ea.mu.Unlock()
@@ -149,6 +250,10 @@ func (ea *EventAggregator) flushPath(path string, force bool) {
 
 	aggregated, exists := ea.events[path]
 	if !exists {
+		ea.mu.Unlock()
+		return
+	}
+	if !force && aggregated.version != version {
 		ea.mu.Unlock()
 		return
 	}
@@ -171,15 +276,16 @@ func (ea *EventAggregator) flushPath(path string, force bool) {
 	}
 	sort.Strings(flags)
 
-	ea.watcher.sendToChannel(WatchEvent{
+	event := WatchEvent{
 		ID:    aggregated.eventID,
 		Path:  aggregated.path,
 		Types: types,
 		Flags: flags,
 		Time:  aggregated.lastSeen,
-	})
+	}
 
 	ea.mu.Unlock()
+	ea.watcher.sendToChannel(event)
 }
 
 // close stops the aggregator and flushes any remaining events
@@ -187,21 +293,19 @@ func (ea *EventAggregator) close() {
 	if !ea.isClosed.CompareAndSwap(false, true) {
 		return
 	}
+	close(ea.done)
 
 	ea.mu.Lock()
 	// Copy paths to avoid modification during iteration
 	paths := make([]string, 0, len(ea.events))
-	for path, aggregated := range ea.events {
-		if aggregated.timer != nil {
-			aggregated.timer.Stop()
-		}
+	for path := range ea.events {
 		paths = append(paths, path)
 	}
 	ea.mu.Unlock()
 
 	// Flush everything immediately
 	for _, path := range paths {
-		ea.flushPath(path, true)
+		ea.flushPath(path, 0, true)
 	}
 }
 
