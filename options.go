@@ -83,6 +83,35 @@ func WithSeverity(level Severity) WatcherOpt {
 	}
 }
 
+// WithIgnoreList sets the list of system and temporary files that are
+// ignored, replacing the platform defaults from [DefaultIgnores]
+// Each key is a pattern as in [filepath.Match], matched against the base
+// name of each path, and any matching file is ignored. Modify the result
+// of [DefaultIgnores] to watch files that are ignored by default on
+// a platform, such as ".plist" files on macOS, or to ignore other files
+// An empty map ignores no files
+//
+// Example: watch .plist files on macOS, and ignore *.orig files:
+//
+//	ignores := fswatcher.DefaultIgnores()
+//	delete(ignores, "*.plist")
+//	ignores["*.orig"] = struct{}{}
+//	w, err := fswatcher.New(fswatcher.WithIgnoreList(ignores))
+func WithIgnoreList(ignores map[string]struct{}) WatcherOpt {
+	return func(w *watcher) {
+		if w.init != nil {
+			return
+		}
+		for pattern := range ignores {
+			if _, err := filepath.Match(pattern, ""); err != nil {
+				w.init = newError("WithIgnoreList", pattern, err)
+				return
+			}
+		}
+		w.ignoreList = sortedPatterns(ignores)
+	}
+}
+
 // WithPath adds an initial path to watch
 func WithPath(path string, options ...PathOption) WatcherOpt {
 	return func(w *watcher) {

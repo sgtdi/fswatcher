@@ -51,7 +51,7 @@ type fileNotifyInformation struct {
 	FileName        [1]uint16
 }
 
-// Windows system files used by isSystemFile
+// Windows system files used by DefaultIgnores
 var osPrefixes = []string{"~", "$"}
 var osSuffixes = []string{".tmp", ".bak", ".swp"}
 

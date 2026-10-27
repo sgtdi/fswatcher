@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-// Linux system files used by isSystemFile
+// Linux system files used by DefaultIgnores
 var osPrefixes = []string{"~", "#", ".#"}
 var osSuffixes = []string{".tmp", ".bak", ".swp", ".save", ".old", ".swo", "~"}
 

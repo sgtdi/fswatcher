@@ -287,7 +287,7 @@ func (w *watcher) handleInotifyEvent(p *inotify, e *unix.InotifyEvent, now time.
 	}
 
 	types := mapInotifyMask(e.Mask)
-	if len(types) == 0 || path == "" || isSystemFile(path) {
+	if len(types) == 0 || path == "" || w.isIgnored(path) {
 		return
 	}
 

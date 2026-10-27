@@ -237,7 +237,7 @@ func (k *kqueue) batchAddWatchesLocked(entries []struct {
 			continue
 		}
 
-		if isSystemFile(e.path) {
+		if k.w.isIgnored(e.path) {
 			continue
 		}
 
@@ -313,7 +313,7 @@ func (k *kqueue) addSingleWatchLocked(path string) error {
 	}
 
 	// Filter system files
-	if isSystemFile(path) {
+	if k.w.isIgnored(path) {
 		return nil
 	}
 

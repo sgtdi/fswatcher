@@ -8,7 +8,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Darwin system files used by isSystemFile
+// Darwin system files used by DefaultIgnores
 var osPrefixes = []string{"~", "._", ".DS_Store", ".localized", ".Trash", ".Trashes"}
 var osSuffixes = []string{".tmp", ".bak", ".swp", ".swo", "~", ".plist", ".download", ".part"}
 
