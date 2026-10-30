@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -605,7 +606,7 @@ func (w *watcher) scanDirectory(path string) {
 			case <-ctx.Done():
 				return filepath.SkipAll
 			default:
-				time.Sleep(time.Millisecond)
+				runtime.Gosched()
 			}
 		}
 
