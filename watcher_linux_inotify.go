@@ -287,7 +287,7 @@ func (w *watcher) handleInotifyEvent(p *inotify, e *unix.InotifyEvent, now time.
 	}
 
 	types := mapInotifyMask(e.Mask)
-	if len(types) == 0 || path == "" || w.isIgnored(path) {
+	if len(types) == 0 || path == "" {
 		return
 	}
 
@@ -353,6 +353,17 @@ func mapInotifyMask(mask uint32) []EventType {
 // addWatch attaches a watch to a directory
 func (p *inotify) addWatch(w *watcher, watchPath *WatchPath) error {
 	path := watchPath.Path
+	watchRoot := path
+	isWatchRoot := false
+	if parentWatch := w.findMostSpecificWatchPath(path); parentWatch != nil {
+		watchRoot = parentWatch.Path
+		isWatchRoot = filepath.Clean(parentWatch.Path) == filepath.Clean(path)
+	}
+	hiddenPath := !w.includeHidden && isHiddenPathWithin(path, watchRoot)
+	if hiddenPath && !isWatchRoot {
+		return nil
+	}
+
 	p.mu.RLock()
 	if node := p.trie.findNode(path); node != nil && node.wd != -1 {
 		p.mu.RUnlock()
@@ -373,9 +384,19 @@ func (p *inotify) addWatch(w *watcher, watchPath *WatchPath) error {
 		w.logDebug("Watching top-level only", "path", path)
 		return nil
 	}
+	if hiddenPath {
+		w.logDebug("Watching hidden root only", "path", path)
+		return nil
+	}
 
 	return filepath.WalkDir(path, func(subp string, d fs.DirEntry, err error) error {
 		if err != nil {
+			return nil
+		}
+		if !w.includeHidden && isHiddenPathWithin(subp, subp) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
 			return nil
 		}
 		if !d.IsDir() || subp == path {

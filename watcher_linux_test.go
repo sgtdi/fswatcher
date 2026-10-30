@@ -176,3 +176,85 @@ func TestInotify_RemoveWatchCleansState(t *testing.T) {
 	// Re-adding the same path must succeed after removal
 	require.NoError(t, p.addWatch(wImpl, wp))
 }
+
+func TestInotifyAddWatchSkipsHiddenDirectoriesByDefault(t *testing.T) {
+	root := t.TempDir()
+	hiddenNested := filepath.Join(root, ".hidden", "nested")
+	visibleNested := filepath.Join(root, "visible", "nested")
+	require.NoError(t, os.MkdirAll(hiddenNested, 0o700))
+	require.NoError(t, os.MkdirAll(visibleNested, 0o700))
+
+	for _, tc := range []struct {
+		name          string
+		includeHidden bool
+		wantHidden    bool
+	}{
+		{name: "hidden excluded by default"},
+		{name: "WithHidden includes hidden", includeHidden: true, wantHidden: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			options := []WatcherOpt{}
+			if tc.includeHidden {
+				options = append(options, WithHidden())
+			}
+			w, err := New(options...)
+			require.NoError(t, err)
+
+			p, err := newInotify()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = unix.Close(p.fd) })
+
+			wp, err := validateWatchPath(root, WatchNested)
+			require.NoError(t, err)
+			require.NoError(t, p.addWatch(w.(*watcher), wp))
+
+			isWatched := func(path string) bool {
+				p.mu.RLock()
+				defer p.mu.RUnlock()
+				for _, watched := range p.wds {
+					if watched.Path == path {
+						return true
+					}
+				}
+				return false
+			}
+
+			assert.True(t, isWatched(visibleNested), "visible nested directory should be watched")
+			assert.Equal(t, tc.wantHidden, isWatched(hiddenNested), "hidden nested directory registration")
+		})
+	}
+}
+
+func TestInotifyHiddenWatchRootCanBeDropped(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".hidden-root")
+	nested := filepath.Join(root, "nested")
+	require.NoError(t, os.MkdirAll(nested, 0o700))
+
+	w, err := New(WithPath(root))
+	require.NoError(t, err)
+	wImpl := w.(*watcher)
+	p, err := newInotify()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = unix.Close(p.fd) })
+	wImpl.streams = map[string]any{"platform": p}
+
+	wp, err := validateWatchPath(root, WatchNested)
+	require.NoError(t, err)
+	require.NoError(t, p.addWatch(wImpl, wp))
+
+	p.mu.RLock()
+	rootWatched := false
+	nestedWatched := false
+	for _, watched := range p.wds {
+		rootWatched = rootWatched || watched.Path == root
+		nestedWatched = nestedWatched || watched.Path == nested
+	}
+	p.mu.RUnlock()
+	assert.True(t, rootWatched, "the explicit hidden root remains removable")
+	assert.False(t, nestedWatched, "hidden roots are not recursively scanned")
+
+	require.NoError(t, wImpl.removeWatch(root))
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	assert.Empty(t, p.wds, "dropping the hidden root removes its watch")
+}

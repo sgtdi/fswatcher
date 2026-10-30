@@ -165,7 +165,7 @@ func TestProcessKqueueEvents(t *testing.T) {
 	defer os.Remove(tmpFile.Name())
 	tmpFile.Close()
 
-	w, err := New()
+	w, err := New(WithPath(filepath.Dir(tmpFile.Name())))
 	require.NoError(t, err)
 	wImpl := w.(*watcher)
 
@@ -219,7 +219,7 @@ func TestScanDirectoryLocked(t *testing.T) {
 	err = os.WriteFile(file1, []byte("content"), 0644)
 	require.NoError(t, err)
 
-	w, err := New()
+	w, err := New(WithPath(tmpDir))
 	require.NoError(t, err)
 	wImpl := w.(*watcher)
 
@@ -292,6 +292,122 @@ func TestAddWatch(t *testing.T) {
 	assert.Contains(t, k.paths, file2)
 	assert.True(t, k.dirs[tmpDir])
 	assert.True(t, k.dirs[subDir])
+}
+
+func TestKqueueAddWatchHiddenPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		includeHidden bool
+		wantHidden    bool
+	}{
+		{name: "hidden paths excluded by default"},
+		{name: "WithHidden includes hidden paths", includeHidden: true, wantHidden: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			hiddenDir := filepath.Join(root, ".hidden")
+			hiddenFile := filepath.Join(root, ".secret")
+			visibleDir := filepath.Join(root, "visible")
+			visibleFile := filepath.Join(root, "public")
+			require.NoError(t, os.MkdirAll(filepath.Join(hiddenDir, "nested"), 0o700))
+			require.NoError(t, os.Mkdir(visibleDir, 0o700))
+			require.NoError(t, os.WriteFile(hiddenFile, []byte("hidden"), 0o600))
+			require.NoError(t, os.WriteFile(visibleFile, []byte("visible"), 0o600))
+
+			options := []WatcherOpt{WithPath(root)}
+			if tc.includeHidden {
+				options = append(options, WithHidden())
+			}
+			w, err := New(options...)
+			require.NoError(t, err)
+			wImpl := w.(*watcher)
+			k, err := newKqueue(wImpl)
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				wImpl.aggregator.close()
+				closeKqueueForTest(k)
+			})
+
+			wp, err := validateWatchPath(root, WatchNested)
+			require.NoError(t, err)
+			require.NoError(t, k.addWatch(wp))
+
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			assert.Contains(t, k.paths, root)
+			assert.Contains(t, k.paths, visibleDir)
+			assert.Contains(t, k.paths, visibleFile)
+			assert.Equal(t, tc.wantHidden, hasKqueuePath(k, hiddenDir))
+			assert.Equal(t, tc.wantHidden, hasKqueuePath(k, filepath.Join(hiddenDir, "nested")))
+			assert.Equal(t, tc.wantHidden, hasKqueuePath(k, hiddenFile))
+		})
+	}
+}
+
+func TestKqueueScanDirectorySkipsHiddenPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		includeHidden bool
+		wantHidden    bool
+	}{
+		{name: "hidden paths excluded by default"},
+		{name: "WithHidden includes hidden paths", includeHidden: true, wantHidden: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			options := []WatcherOpt{WithPath(root)}
+			if tc.includeHidden {
+				options = append(options, WithHidden())
+			}
+			w, err := New(options...)
+			require.NoError(t, err)
+			wImpl := w.(*watcher)
+			k, err := newKqueue(wImpl)
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				wImpl.aggregator.close()
+				closeKqueueForTest(k)
+			})
+
+			wp, err := validateWatchPath(root, WatchNested)
+			require.NoError(t, err)
+			require.NoError(t, k.addWatch(wp))
+
+			hiddenDir := filepath.Join(root, ".hidden")
+			hiddenFile := filepath.Join(root, ".secret")
+			visibleDir := filepath.Join(root, "visible")
+			visibleFile := filepath.Join(root, "public")
+			require.NoError(t, os.Mkdir(hiddenDir, 0o700))
+			require.NoError(t, os.Mkdir(visibleDir, 0o700))
+			require.NoError(t, os.WriteFile(hiddenFile, []byte("hidden"), 0o600))
+			require.NoError(t, os.WriteFile(visibleFile, []byte("visible"), 0o600))
+
+			k.mu.Lock()
+			wImpl.scanDirectoryLocked(k, root)
+			k.mu.Unlock()
+
+			k.mu.Lock()
+			assert.Contains(t, k.paths, visibleDir)
+			assert.Contains(t, k.paths, visibleFile)
+			assert.Equal(t, tc.wantHidden, hasKqueuePath(k, hiddenDir))
+			assert.Equal(t, tc.wantHidden, hasKqueuePath(k, hiddenFile))
+			k.mu.Unlock()
+		})
+	}
+}
+
+func hasKqueuePath(k *kqueue, path string) bool {
+	_, exists := k.paths[path]
+	return exists
+}
+
+func closeKqueueForTest(k *kqueue) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for fd := range k.wds {
+		_ = unix.Close(fd)
+	}
+	_ = unix.Close(k.kqFd)
 }
 
 func TestAddSingleWatchLocked(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -56,12 +57,13 @@ func (f *patternFilter) ShouldInclude(path string) bool {
 // isSubpath reports whether the child path is inside the parent directory
 func isSubpath(parent, child string) bool {
 	rel, err := filepath.Rel(parent, child)
-	return err == nil && rel != "." && rel != ".." && !startsWithDotDot(rel)
+	return err == nil && rel != "." && !startsWithDotDot(rel)
 }
 
-// startsWithDotDot checks if a relative path string starts with "../"
+// startsWithDotDot reports whether a relative path is the parent directory or
+// starts with a parent-directory path segment.
 func startsWithDotDot(rel string) bool {
-	return len(rel) >= 2 && rel[:2] == ".."
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // DefaultIgnores returns the default ignore list of system and temporary
@@ -93,9 +95,31 @@ func sortedPatterns(ignores map[string]struct{}) []string {
 	return list
 }
 
-// isIgnored checks if a path is likely a temporary or system-generated file,
-// using the ignore list set by [WithIgnoreList], or the defaults if not set
+// isIgnored checks whether a path is hidden or matches a temporary/system file
+// pattern from [WithIgnoreList], or the defaults if no list was set.
 func (w *watcher) isIgnored(path string) bool {
+	return w.isIgnoredForWatch(path, w.findMostSpecificWatchPath(path))
+}
+
+// isIgnoredForWatch checks path filters when the matching watch is already
+// known, avoiding a second scan of watched paths in the event pipeline.
+func (w *watcher) isIgnoredForWatch(path string, watch *WatchPath) bool {
+	if !w.includeHidden {
+		root := ""
+		if watch != nil {
+			root = watch.Path
+		}
+		if isHiddenPathWithin(path, root) {
+			return true
+		}
+	}
+
+	return w.isIgnoredPattern(path)
+}
+
+// isIgnoredPattern reports whether a path matches the configured system and
+// temporary file patterns, or the defaults if no list was set.
+func (w *watcher) isIgnoredPattern(path string) bool {
 	patterns := w.ignoreList
 	if patterns == nil {
 		patterns = defaultIgnoreList
@@ -107,4 +131,42 @@ func (w *watcher) isIgnored(path string) bool {
 		}
 	}
 	return false
+}
+
+// isHiddenPathWithin reports whether a path is hidden, checking ancestors only
+// as far as the watched root when the path belongs to one.
+func isHiddenPathWithin(path, root string) bool {
+	return isPlatformHidden(path, root)
+}
+
+func hasHiddenPathComponentWithin(path, root string) bool {
+	return walkPathAncestors(path, root, isDotHiddenComponent)
+}
+
+func isDotHiddenComponent(path string) bool {
+	base := filepath.Base(path)
+	return base != "." && base != ".." && strings.HasPrefix(base, ".")
+}
+
+// walkPathAncestors visits a path and its parents, stopping after root when it
+// is an ancestor of path. An empty or unrelated root means the whole path.
+func walkPathAncestors(path, root string, visit func(string) bool) bool {
+	current := filepath.Clean(path)
+	root = filepath.Clean(root)
+	bounded := root != "." && (current == root || isSubpath(root, current))
+
+	for {
+		if visit(current) {
+			return true
+		}
+		if bounded && current == root {
+			return false
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
 }
