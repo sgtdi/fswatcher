@@ -60,7 +60,7 @@ The library automatically selects the correct implementation based on the build 
 Most Go file watchers give you raw OS events—which means duplicate events and noise from system files. FSWatcher solves this:
 
 - **Built-in debouncing** - Merge rapid-fire events automatically
-- **Smart filtering** - Regex patterns + automatic system file exclusion (`.git`, `.DS_Store`, etc., customizable with `WithIgnoreList`)
+- **Smart filtering** - Regex patterns + automatic exclusion of platform-specific system and temporary files, customizable with `WithIgnoreList`
 - **Zero dependencies** - Just standard library + native OS APIs
 - **Context-based** - Modern Go patterns with graceful shutdown
 
