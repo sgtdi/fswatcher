@@ -8,7 +8,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// BSD system files used by isSystemFile
+// BSD system files used by DefaultIgnores
 var osPrefixes = []string{"~", ".Trash"}
 var osSuffixes = []string{".tmp", ".bak", ".swp", ".swo", "~"}
 

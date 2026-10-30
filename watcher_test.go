@@ -905,3 +905,51 @@ func TestBackoffState(t *testing.T) {
 		assert.Equal(t, 10*time.Millisecond, state.duration)
 	})
 }
+
+// TestWatcherIgnoreList checks that WithIgnoreList changes the files
+// whose events are delivered: a deleted default pattern, and an added one
+func TestWatcherIgnoreList(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	ignores := DefaultIgnores()
+	delete(ignores, "*.tmp")
+	ignores["*.orig"] = struct{}{}
+	readyChan := make(chan struct{})
+	w, err := New(
+		WithPath(dir),
+		WithCooldown(50*time.Millisecond),
+		WithReadyChannel(readyChan),
+		WithIgnoreList(ignores),
+	)
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = w.Watch(ctx) }()
+	select {
+	case <-readyChan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Watcher is not ready")
+	}
+
+	var mu sync.Mutex
+	seen := make(map[string]bool)
+	go func() {
+		for event := range w.Events() {
+			mu.Lock()
+			seen[filepath.Base(event.Path)] = true
+			mu.Unlock()
+		}
+	}()
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "file.orig"), []byte("x"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "file.tmp"), []byte("x"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "file.txt"), []byte("x"), 0644))
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return seen["file.tmp"] && seen["file.txt"]
+	}, 5*time.Second, 20*time.Millisecond, "file.tmp and file.txt events")
+	mu.Lock()
+	defer mu.Unlock()
+	assert.False(t, seen["file.orig"], "file.orig is ignored")
+}

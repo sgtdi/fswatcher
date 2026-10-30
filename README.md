@@ -60,7 +60,7 @@ The library automatically selects the correct implementation based on the build 
 Most Go file watchers give you raw OS events—which means duplicate events and noise from system files. FSWatcher solves this:
 
 - **Built-in debouncing** - Merge rapid-fire events automatically
-- **Smart filtering** - Regex patterns + automatic system file exclusion (`.git`, `.DS_Store`, etc.)
+- **Smart filtering** - Regex patterns + automatic system file exclusion (`.git`, `.DS_Store`, etc., customizable with `WithIgnoreList`)
 - **Zero dependencies** - Just standard library + native OS APIs
 - **Context-based** - Modern Go patterns with graceful shutdown
 
@@ -130,6 +130,7 @@ Customize the watcher's behavior using functional options passed to `fswatcher.N
 | `WithBufferSize(size)`      | Sets the size of the main event channel | `4096` |
 | `WithIncRegex(patterns...)` | Global include regex patterns — only matching paths are processed. If not set, all non-excluded paths are processed | (none) |
 | `WithExcRegex(patterns...)` | Global exclude regex patterns — matching paths are ignored. Exclusions take precedence over inclusions | (none) |
+| `WithIgnoreList(ignores)`   | Sets the ignored system and temporary files: a `map[string]struct{}` of [`filepath.Match`](https://pkg.go.dev/path/filepath#Match) patterns for base names. Start from `DefaultIgnores()` to add or delete patterns, e.g. delete `"*.plist"` to watch `.plist` files on macOS | `DefaultIgnores()` |
 | `WithSeverity(level)`       | Sets the logging verbosity (`SeverityDebug`, `SeverityInfo`, `SeverityWarn`, `SeverityError`) | `SeverityWarn` |
 | `WithLogFile(path)`         | Sets a file for logging. Use `"stdout"` to log to the console or `""` to disable | (disabled) |
 | `WithLinuxPlatform(p)`      | Sets a specific backend (`PlatformInotify` or `PlatformFanotify`) on Linux | `PlatformInotify` |

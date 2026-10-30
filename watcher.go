@@ -73,6 +73,9 @@ type watcher struct {
 	incRegexPatterns   []string
 	excRegexPatterns   []string
 
+	// Ignored file patterns, set by WithIgnoreList; nil uses the defaults
+	ignoreList []string
+
 	// Linux fields
 	platformLinux PlatformLinux
 
@@ -721,7 +724,7 @@ func (w *watcher) handlePlatformEvent(event WatchEvent) {
 		"time", event.Time)
 
 	// Filter system files
-	if isSystemFile(event.Path) {
+	if w.isIgnored(event.Path) {
 		w.logDebug("Filtered system file", "path", event.Path)
 		atomic.AddInt64(&w.stats.eventsFiltered, 1)
 		return

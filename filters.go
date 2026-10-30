@@ -3,7 +3,7 @@ package fswatcher
 import (
 	"path/filepath"
 	"regexp"
-	"strings"
+	"sort"
 	"sync"
 )
 
@@ -64,17 +64,45 @@ func startsWithDotDot(rel string) bool {
 	return len(rel) >= 2 && rel[:2] == ".."
 }
 
-// isSystemFile checks if a path is likely a temporary or system-generated file
-func isSystemFile(path string) bool {
-	base := filepath.Base(path)
-
+// DefaultIgnores returns the default ignore list of system and temporary
+// files on the current platform, as used by [WithIgnoreList]: the platform
+// prefixes as "prefix*" patterns and suffixes as "*suffix" patterns
+// The returned map is a new copy that can be modified, to add or delete
+// patterns, and passed to [WithIgnoreList]
+func DefaultIgnores() map[string]struct{} {
+	ignores := make(map[string]struct{}, len(osPrefixes)+len(osSuffixes))
 	for _, prefix := range osPrefixes {
-		if strings.HasPrefix(base, prefix) {
-			return true
-		}
+		ignores[prefix+"*"] = struct{}{}
 	}
 	for _, suffix := range osSuffixes {
-		if strings.HasSuffix(base, suffix) {
+		ignores["*"+suffix] = struct{}{}
+	}
+	return ignores
+}
+
+// defaultIgnoreList is the sorted list of default ignore patterns
+var defaultIgnoreList = sortedPatterns(DefaultIgnores())
+
+// sortedPatterns returns the patterns of an ignore list, sorted
+func sortedPatterns(ignores map[string]struct{}) []string {
+	list := make([]string, 0, len(ignores))
+	for pattern := range ignores {
+		list = append(list, pattern)
+	}
+	sort.Strings(list)
+	return list
+}
+
+// isIgnored checks if a path is likely a temporary or system-generated file,
+// using the ignore list set by [WithIgnoreList], or the defaults if not set
+func (w *watcher) isIgnored(path string) bool {
+	patterns := w.ignoreList
+	if patterns == nil {
+		patterns = defaultIgnoreList
+	}
+	base := filepath.Base(path)
+	for _, pattern := range patterns {
+		if matched, _ := filepath.Match(pattern, base); matched {
 			return true
 		}
 	}

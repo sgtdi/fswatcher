@@ -41,9 +41,9 @@ func TestIsSystemFile(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			actual := isSystemFile(tc.path)
+			actual := (&watcher{}).isIgnored(tc.path)
 			if actual != tc.expected {
-				t.Errorf("isSystemFile(%q) = %v; want %v", tc.path, actual, tc.expected)
+				t.Errorf("isIgnored(%q) = %v; want %v", tc.path, actual, tc.expected)
 			}
 		})
 	}

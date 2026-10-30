@@ -67,5 +67,5 @@ func TestWatcher_Darwin(t *testing.T) {
 }
 
 func TestIsSystemFile_DarwinAppleDouble(t *testing.T) {
-	assert.True(t, isSystemFile("/tmp/._document.txt"))
+	assert.True(t, (&watcher{}).isIgnored("/tmp/._document.txt"))
 }

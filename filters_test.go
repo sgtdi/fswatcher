@@ -79,3 +79,47 @@ func TestPatternFilter_ShouldInclude(t *testing.T) {
 		})
 	}
 }
+
+func TestIgnoreList(t *testing.T) {
+	defaults := DefaultIgnores()
+	require.NotEmpty(t, defaults)
+	assert.Contains(t, defaults, "*.tmp", "*.tmp is a default on all platforms")
+
+	t.Run("Defaults", func(t *testing.T) {
+		w, err := New(WithPath(tempDir))
+		require.NoError(t, err)
+		ww := w.(*watcher)
+		assert.True(t, ww.isIgnored("/path/file.tmp"))
+		assert.False(t, ww.isIgnored("/path/file.go"))
+	})
+
+	t.Run("Customized", func(t *testing.T) {
+		ignores := DefaultIgnores()
+		delete(ignores, "*.tmp")
+		ignores["*.orig"] = struct{}{}
+		ignores["backup-*"] = struct{}{}
+		w, err := New(WithPath(tempDir), WithIgnoreList(ignores))
+		require.NoError(t, err)
+		ww := w.(*watcher)
+		assert.False(t, ww.isIgnored("/path/file.tmp"), "deleted default")
+		assert.True(t, ww.isIgnored("/path/file.orig"), "added pattern")
+		assert.True(t, ww.isIgnored("/path/backup-1.go"), "added pattern")
+		assert.False(t, ww.isIgnored("/path/backup/file.go"), "only the base name is matched")
+		assert.True(t, ww.isIgnored("/path/file.bak"), "other defaults kept")
+		assert.Contains(t, DefaultIgnores(), "*.tmp", "defaults not modified")
+	})
+
+	t.Run("Empty", func(t *testing.T) {
+		w, err := New(WithPath(tempDir), WithIgnoreList(map[string]struct{}{}))
+		require.NoError(t, err)
+		ww := w.(*watcher)
+		assert.False(t, ww.isIgnored("/path/file.tmp"))
+		assert.False(t, ww.isIgnored("/path/~file"))
+	})
+
+	t.Run("InvalidPattern", func(t *testing.T) {
+		w, err := New(WithPath(tempDir), WithIgnoreList(map[string]struct{}{"[": {}}))
+		assert.Nil(t, w)
+		assert.Error(t, err)
+	})
+}
