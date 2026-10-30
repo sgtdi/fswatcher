@@ -1,7 +1,9 @@
 package fswatcher
 
 import (
+	"container/heap"
 	"fmt"
+	"math/bits"
 	"sort"
 	"strings"
 	"sync"
@@ -55,25 +57,85 @@ func (we WatchEvent) String() string {
 
 // EventAggregator merges multiple events for the same path over a short duration
 type EventAggregator struct {
-	events   map[string]*aggregatedEvent
-	cooldown time.Duration
-	watcher  *watcher
-	mu       sync.Mutex
-	isClosed atomic.Bool
-	started  atomic.Bool
-	wake     chan struct{}
-	done     chan struct{}
+	events    map[string]*aggregatedEvent
+	deadlines deadlineHeap
+	cooldown  time.Duration
+	watcher   *watcher
+	mu        sync.Mutex
+	isClosed  atomic.Bool
+	started   atomic.Bool
+	wake      chan struct{}
+	done      chan struct{}
 }
 
 // aggregatedEvent holds merged data for events on the same path
 type aggregatedEvent struct {
-	path     string
-	types    map[EventType]struct{}
-	flags    map[string]struct{}
-	lastSeen time.Time
-	eventID  uint64
-	deadline time.Time
-	version  uint64
+	path       string
+	typeMask   uint8
+	extraTypes map[EventType]struct{}
+	flags      map[string]struct{}
+	lastSeen   time.Time
+	eventID    uint64
+	deadline   time.Time
+	version    uint64
+	heapIndex  int
+}
+
+// deadlineHeap keeps the next event to flush at the root, avoiding a scan of
+// every pending path whenever the timer is reset or expires.
+type deadlineHeap []*aggregatedEvent
+
+func (h deadlineHeap) Len() int           { return len(h) }
+func (h deadlineHeap) Less(i, j int) bool { return h[i].deadline.Before(h[j].deadline) }
+func (h deadlineHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].heapIndex = i
+	h[j].heapIndex = j
+}
+
+func (h *deadlineHeap) Push(value any) {
+	event := value.(*aggregatedEvent)
+	event.heapIndex = len(*h)
+	*h = append(*h, event)
+}
+
+func (h *deadlineHeap) Pop() any {
+	old := *h
+	last := len(old) - 1
+	event := old[last]
+	old[last] = nil
+	event.heapIndex = -1
+	*h = old[:last]
+	return event
+}
+
+func (event *aggregatedEvent) addTypes(types []EventType) {
+	for _, eventType := range types {
+		if eventType <= EventOverflow {
+			event.typeMask |= 1 << eventType
+			continue
+		}
+		if event.extraTypes == nil {
+			event.extraTypes = make(map[EventType]struct{})
+		}
+		event.extraTypes[eventType] = struct{}{}
+	}
+}
+
+func (event *aggregatedEvent) eventTypes() []EventType {
+	types := make([]EventType, 0, bits.OnesCount8(event.typeMask)+len(event.extraTypes))
+	for eventType := EventUnknown; eventType <= EventOverflow; eventType++ {
+		if event.typeMask&(1<<eventType) != 0 {
+			types = append(types, eventType)
+		}
+	}
+	for eventType := range event.extraTypes {
+		types = append(types, eventType)
+	}
+	if len(event.extraTypes) > 1 {
+		sort.Slice(types, func(i, j int) bool { return types[i] < types[j] })
+	}
+	return types
 }
 
 // newEventAggregator creates a new event aggregator
@@ -98,6 +160,9 @@ func (ea *EventAggregator) addEvent(event WatchEvent) {
 
 	ea.mu.Lock()
 	defer ea.mu.Unlock()
+	if ea.isClosed.Load() {
+		return
+	}
 
 	now := time.Now()
 	deadline := now.Add(ea.cooldown)
@@ -112,33 +177,36 @@ func (ea *EventAggregator) addEvent(event WatchEvent) {
 			existing.eventID = event.ID
 		}
 
-		for _, t := range event.Types {
-			existing.types[t] = struct{}{}
-		}
+		existing.addTypes(event.Types)
 		for _, f := range event.Flags {
+			if existing.flags == nil {
+				existing.flags = make(map[string]struct{})
+			}
 			existing.flags[f] = struct{}{}
 		}
+		if existing.heapIndex < 0 {
+			heap.Push(&ea.deadlines, existing)
+		} else {
+			heap.Fix(&ea.deadlines, existing.heapIndex)
+		}
 	} else {
-		// Create a new aggregated event
-		types := make(map[EventType]struct{}, len(event.Types))
-		for _, t := range event.Types {
-			types[t] = struct{}{}
-		}
-		flags := make(map[string]struct{}, len(event.Flags))
-		for _, f := range event.Flags {
-			flags[f] = struct{}{}
-		}
-
 		existing = &aggregatedEvent{
-			path:     event.Path,
-			types:    types,
-			flags:    flags,
-			lastSeen: now,
-			eventID:  event.ID,
-			deadline: deadline,
-			version:  1,
+			path:      event.Path,
+			lastSeen:  now,
+			eventID:   event.ID,
+			deadline:  deadline,
+			version:   1,
+			heapIndex: -1,
+		}
+		existing.addTypes(event.Types)
+		for _, f := range event.Flags {
+			if existing.flags == nil {
+				existing.flags = make(map[string]struct{})
+			}
+			existing.flags[f] = struct{}{}
 		}
 		ea.events[event.Path] = existing
+		heap.Push(&ea.deadlines, existing)
 	}
 
 	ea.signal()
@@ -204,14 +272,10 @@ func (ea *EventAggregator) run() {
 func (ea *EventAggregator) nextDeadline() (time.Time, bool) {
 	ea.mu.Lock()
 	defer ea.mu.Unlock()
-
-	var next time.Time
-	for _, event := range ea.events {
-		if next.IsZero() || event.deadline.Before(next) {
-			next = event.deadline
-		}
+	if len(ea.deadlines) == 0 {
+		return time.Time{}, false
 	}
-	return next, !next.IsZero()
+	return ea.deadlines[0].deadline, true
 }
 
 func (ea *EventAggregator) flushDue(now time.Time) {
@@ -225,13 +289,17 @@ func (ea *EventAggregator) flushDue(now time.Time) {
 		ea.mu.Unlock()
 		return
 	}
-	for path, event := range ea.events {
+	for len(ea.deadlines) > 0 {
+		event := ea.deadlines[0]
 		if !event.deadline.After(now) {
+			heap.Pop(&ea.deadlines)
 			ready = append(ready, struct {
 				path    string
 				version uint64
-			}{path: path, version: event.version})
+			}{path: event.path, version: event.version})
+			continue
 		}
+		break
 	}
 	ea.mu.Unlock()
 
@@ -259,16 +327,13 @@ func (ea *EventAggregator) flushPath(path string, version uint64, force bool) {
 	}
 
 	// Remove from map before sending to avoid race with new events
+	if aggregated.heapIndex >= 0 {
+		heap.Remove(&ea.deadlines, aggregated.heapIndex)
+	}
 	delete(ea.events, path)
 
 	// Collect unique types and flags
-	types := make([]EventType, 0, len(aggregated.types))
-	for t := range aggregated.types {
-		types = append(types, t)
-	}
-	sort.Slice(types, func(i, j int) bool {
-		return types[i] < types[j]
-	})
+	types := aggregated.eventTypes()
 
 	flags := make([]string, 0, len(aggregated.flags))
 	for f := range aggregated.flags {

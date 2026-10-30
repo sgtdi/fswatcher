@@ -1,6 +1,7 @@
 package fswatcher
 
 import (
+	"container/heap"
 	"math/rand"
 	"slices"
 	"sync"
@@ -363,6 +364,55 @@ func TestEventAggregator(t *testing.T) {
 			}
 		case <-time.After(100 * time.Millisecond):
 			t.Fatal("timeout waiting for aggregated event")
+		}
+	})
+
+	t.Run("UnexpectedEventTypesRemainSorted", func(t *testing.T) {
+		events := make(chan WatchEvent, 1)
+		ea := newEventAggregator(&watcher{events: events}, time.Hour)
+		ea.addEvent(WatchEvent{
+			Path:  "/test/file.txt",
+			Types: []EventType{EventType(99), EventCreate, EventType(42), EventCreate},
+		})
+		ea.close()
+
+		got := <-events
+		want := []EventType{EventCreate, EventType(42), EventType(99)}
+		if !slices.Equal(got.Types, want) {
+			t.Fatalf("unexpected event type ordering: got %v, want %v", got.Types, want)
+		}
+	})
+
+	t.Run("DeadlineHeapTracksUpdatedEvents", func(t *testing.T) {
+		ea := newEventAggregator(&watcher{events: make(chan WatchEvent, 3)}, time.Hour)
+		defer ea.close()
+
+		for _, path := range []string{"/test/a", "/test/b", "/test/c"} {
+			ea.addEvent(WatchEvent{Path: path, Types: []EventType{EventCreate}})
+		}
+
+		// Force distinct deadlines to make heap ordering deterministic.
+		ea.mu.Lock()
+		ea.events["/test/a"].deadline = time.Now().Add(3 * time.Second)
+		ea.events["/test/b"].deadline = time.Now().Add(time.Second)
+		ea.events["/test/c"].deadline = time.Now().Add(2 * time.Second)
+		for _, event := range ea.events {
+			heap.Fix(&ea.deadlines, event.heapIndex)
+		}
+		want := ea.events["/test/b"].deadline
+		ea.mu.Unlock()
+
+		if got, ok := ea.nextDeadline(); !ok || !got.Equal(want) {
+			t.Fatalf("nextDeadline() = %v, %v; want %v, true", got, ok, want)
+		}
+
+		// Updating the current root must move it to its new position.
+		ea.addEvent(WatchEvent{Path: "/test/b", Types: []EventType{EventMod}})
+		ea.mu.Lock()
+		want = ea.events["/test/c"].deadline
+		ea.mu.Unlock()
+		if got, ok := ea.nextDeadline(); !ok || !got.Equal(want) {
+			t.Fatalf("nextDeadline() after update = %v, %v; want %v, true", got, ok, want)
 		}
 	})
 }
