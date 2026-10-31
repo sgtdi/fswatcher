@@ -60,8 +60,8 @@ The library automatically selects the correct implementation based on the build 
 Most Go file watchers give you raw OS events—which means duplicate events and noise from system files. FSWatcher solves this:
 
 - **Built-in debouncing** - Merge rapid-fire events automatically
-- **Smart filtering** - Regex patterns + automatic exclusion of platform-specific system and temporary files, customizable with `WithIgnoreList`
-- **Zero dependencies** - Just standard library + native OS APIs
+- **Smart filtering** - Hidden paths are excluded by default; regex patterns and platform-specific system and temporary files are filtered automatically, with `WithIgnoreList` for customization
+- **Lightweight dependencies** - `golang.org/x/sys` for low-level platform APIs, plus the standard library
 - **Context-based** - Modern Go patterns with graceful shutdown
 
 
@@ -130,7 +130,8 @@ Customize the watcher's behavior using functional options passed to `fswatcher.N
 | `WithBufferSize(size)`      | Sets the size of the main event channel | `4096` |
 | `WithIncRegex(patterns...)` | Global include regex patterns — only matching paths are processed. If not set, all non-excluded paths are processed | (none) |
 | `WithExcRegex(patterns...)` | Global exclude regex patterns — matching paths are ignored. Exclusions take precedence over inclusions | (none) |
-| `WithIgnoreList(ignores)`   | Sets the ignored system and temporary files: a `map[string]struct{}` of [`filepath.Match`](https://pkg.go.dev/path/filepath#Match) patterns for base names. Start from `DefaultIgnores()` to add or delete patterns, e.g. delete `"*.plist"` to watch `.plist` files on macOS | `DefaultIgnores()` |
+| `WithHidden()`              | Includes hidden files and directories. By default, dot-prefixed paths are excluded on Unix-like platforms; Windows `FILE_ATTRIBUTE_HIDDEN` and macOS/FreeBSD `UF_HIDDEN` paths are also excluded. System and temporary ignore patterns still apply | Excluded |
+| `WithIgnoreList(ignores)`   | Sets the ignored system and temporary files: a `map[string]struct{}` of [`filepath.Match`](https://pkg.go.dev/path/filepath#Match) patterns for base names. Start from `DefaultIgnores()` to add or delete patterns, e.g. delete `"*.plist"` and use `WithHidden()` to watch `.plist` files on macOS | `DefaultIgnores()` |
 | `WithSeverity(level)`       | Sets the logging verbosity (`SeverityDebug`, `SeverityInfo`, `SeverityWarn`, `SeverityError`) | `SeverityWarn` |
 | `WithLogFile(path)`         | Sets a file for logging. Use `"stdout"` to log to the console or `""` to disable | (disabled) |
 | `WithLinuxPlatform(p)`      | Sets a specific backend (`PlatformInotify` or `PlatformFanotify`) on Linux | `PlatformInotify` |
@@ -176,7 +177,7 @@ The watcher operates in a clear, multi-stage pipeline. Each raw OS event goes th
 | Stage | Description |
 | :--- | :--- |
 | **OS API** | The OS (`FSEvents`, `inotify`, `ReadDirectoryChangesW`) captures a raw file system event |
-| **Filtering** | The path is checked against system file rules and regex patterns. Excluded paths are dropped |
+| **Filtering** | Hidden paths, system file rules, and regex patterns are checked. Excluded paths are dropped |
 | **Debouncing** | The event is held for the cooldown period. Subsequent events for the same path are merged. The timer resets on each new event |
 | **User channel** | The final, clean `WatchEvent` is sent to `Events()` |
 

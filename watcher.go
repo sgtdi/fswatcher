@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -72,6 +73,7 @@ type watcher struct {
 	ownsDroppedChannel bool
 	incRegexPatterns   []string
 	excRegexPatterns   []string
+	includeHidden      bool
 
 	// Ignored file patterns, set by WithIgnoreList; nil uses the defaults
 	ignoreList []string
@@ -576,6 +578,15 @@ func (w *watcher) scanDirectory(path string) {
 	if w.isShuttingDown.Load() {
 		return
 	}
+	if !w.includeHidden {
+		watchRoot := path
+		if parentWatch := w.findMostSpecificWatchPath(path); parentWatch != nil {
+			watchRoot = parentWatch.Path
+		}
+		if isHiddenPathWithin(path, watchRoot) {
+			return
+		}
+	}
 
 	w.logInfo("Starting manual scan of directory", "path", path)
 
@@ -593,6 +604,12 @@ func (w *watcher) scanDirectory(path string) {
 		if err != nil {
 			return nil // Skip files with errors
 		}
+		if !w.includeHidden && isHiddenPathWithin(filePath, filePath) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 
 		// Don't emit event for the root path being scanned
 		if filePath == path {
@@ -605,7 +622,7 @@ func (w *watcher) scanDirectory(path string) {
 			case <-ctx.Done():
 				return filepath.SkipAll
 			default:
-				time.Sleep(time.Millisecond)
+				runtime.Gosched()
 			}
 		}
 
@@ -724,7 +741,7 @@ func (w *watcher) handlePlatformEvent(event WatchEvent) {
 		"time", event.Time)
 
 	// Filter system files
-	if w.isIgnored(event.Path) {
+	if w.isIgnoredForWatch(event.Path, parentWatch) {
 		w.logDebug("Filtered system file", "path", event.Path)
 		atomic.AddInt64(&w.stats.eventsFiltered, 1)
 		return

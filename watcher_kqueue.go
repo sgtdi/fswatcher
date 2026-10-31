@@ -173,6 +173,16 @@ func (w *watcher) processKqueueEvents(k *kqueue, events []unix.Kevent_t) {
 
 // scanDirectoryLocked checks for new files in a watched dir
 func (w *watcher) scanDirectoryLocked(k *kqueue, dirPath string) {
+	if !k.w.includeHidden {
+		watchRoot := dirPath
+		if parentWatch := k.w.findMostSpecificWatchPath(dirPath); parentWatch != nil {
+			watchRoot = parentWatch.Path
+		}
+		if isHiddenPathWithin(dirPath, watchRoot) {
+			return
+		}
+	}
+
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		return
@@ -185,6 +195,9 @@ func (w *watcher) scanDirectoryLocked(k *kqueue, dirPath string) {
 
 	for _, entry := range entries {
 		fullPath := filepath.Join(dirPath, entry.Name())
+		if !k.w.includeHidden && isHiddenPathWithin(fullPath, fullPath) {
+			continue
+		}
 		if _, exists := k.paths[fullPath]; !exists {
 			newEntries = append(newEntries, struct {
 				path  string
@@ -237,7 +250,7 @@ func (k *kqueue) batchAddWatchesLocked(entries []struct {
 			continue
 		}
 
-		if k.w.isIgnored(e.path) {
+		if k.w.isIgnoredPattern(e.path) {
 			continue
 		}
 
@@ -302,6 +315,12 @@ func (k *kqueue) addWatch(watchPath *WatchPath) error {
 		if err != nil {
 			return nil // Skip errors
 		}
+		if !k.w.includeHidden && isHiddenPathWithin(path, path) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
 		return k.addSingleWatchLocked(path)
 	})
 }
@@ -313,7 +332,7 @@ func (k *kqueue) addSingleWatchLocked(path string) error {
 	}
 
 	// Filter system files
-	if k.w.isIgnored(path) {
+	if k.w.isIgnoredPattern(path) {
 		return nil
 	}
 

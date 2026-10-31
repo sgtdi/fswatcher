@@ -1,7 +1,9 @@
 package fswatcher
 
 import (
+	"container/heap"
 	"math/rand"
+	"path/filepath"
 	"slices"
 	"sync"
 	"testing"
@@ -14,7 +16,7 @@ func TestIsSystemFile(t *testing.T) {
 		path     string
 		expected bool
 	}{
-		{"Normal file", "/path/document.docx", false},
+		{"Normal file", filepath.Join(tempDir, "path", "document.docx"), false},
 	}
 
 	if len(osPrefixes) > 0 {
@@ -25,7 +27,7 @@ func TestIsSystemFile(t *testing.T) {
 			name     string
 			path     string
 			expected bool
-		}{"Dynamic system file prefix", "/path/" + randomPrefix + "file", true})
+		}{"Dynamic system file prefix", filepath.Join(tempDir, "path", randomPrefix+"file"), true})
 	}
 
 	if len(osSuffixes) > 0 {
@@ -36,12 +38,12 @@ func TestIsSystemFile(t *testing.T) {
 			name     string
 			path     string
 			expected bool
-		}{"Dynamic system file suffix", "/path/file" + randomSuffix, true})
+		}{"Dynamic system file suffix", filepath.Join(tempDir, "path", "file"+randomSuffix), true})
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			actual := (&watcher{}).isIgnored(tc.path)
+			actual := watcherForHiddenPathTest(tempDir).isIgnored(tc.path)
 			if actual != tc.expected {
 				t.Errorf("isIgnored(%q) = %v; want %v", tc.path, actual, tc.expected)
 			}
@@ -363,6 +365,55 @@ func TestEventAggregator(t *testing.T) {
 			}
 		case <-time.After(100 * time.Millisecond):
 			t.Fatal("timeout waiting for aggregated event")
+		}
+	})
+
+	t.Run("UnexpectedEventTypesRemainSorted", func(t *testing.T) {
+		events := make(chan WatchEvent, 1)
+		ea := newEventAggregator(&watcher{events: events}, time.Hour)
+		ea.addEvent(WatchEvent{
+			Path:  "/test/file.txt",
+			Types: []EventType{EventType(99), EventCreate, EventType(42), EventCreate},
+		})
+		ea.close()
+
+		got := <-events
+		want := []EventType{EventCreate, EventType(42), EventType(99)}
+		if !slices.Equal(got.Types, want) {
+			t.Fatalf("unexpected event type ordering: got %v, want %v", got.Types, want)
+		}
+	})
+
+	t.Run("DeadlineHeapTracksUpdatedEvents", func(t *testing.T) {
+		ea := newEventAggregator(&watcher{events: make(chan WatchEvent, 3)}, time.Hour)
+		defer ea.close()
+
+		for _, path := range []string{"/test/a", "/test/b", "/test/c"} {
+			ea.addEvent(WatchEvent{Path: path, Types: []EventType{EventCreate}})
+		}
+
+		// Force distinct deadlines to make heap ordering deterministic.
+		ea.mu.Lock()
+		ea.events["/test/a"].deadline = time.Now().Add(3 * time.Second)
+		ea.events["/test/b"].deadline = time.Now().Add(time.Second)
+		ea.events["/test/c"].deadline = time.Now().Add(2 * time.Second)
+		for _, event := range ea.events {
+			heap.Fix(&ea.deadlines, event.heapIndex)
+		}
+		want := ea.events["/test/b"].deadline
+		ea.mu.Unlock()
+
+		if got, ok := ea.nextDeadline(); !ok || !got.Equal(want) {
+			t.Fatalf("nextDeadline() = %v, %v; want %v, true", got, ok, want)
+		}
+
+		// Updating the current root must move it to its new position.
+		ea.addEvent(WatchEvent{Path: "/test/b", Types: []EventType{EventMod}})
+		ea.mu.Lock()
+		want = ea.events["/test/c"].deadline
+		ea.mu.Unlock()
+		if got, ok := ea.nextDeadline(); !ok || !got.Equal(want) {
+			t.Fatalf("nextDeadline() after update = %v, %v; want %v, true", got, ok, want)
 		}
 	})
 }

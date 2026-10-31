@@ -48,6 +48,17 @@ func WithExcRegex(patterns ...string) WatcherOpt {
 	}
 }
 
+// WithHidden includes hidden files and directories in the events sent by the
+// watcher. By default, dot-prefixed paths are excluded on Unix-like platforms.
+// Windows paths with FILE_ATTRIBUTE_HIDDEN and macOS/FreeBSD paths with the
+// UF_HIDDEN flag are also excluded. System and temporary patterns from
+// [WithIgnoreList] remain active.
+func WithHidden() WatcherOpt {
+	return func(w *watcher) {
+		w.includeHidden = true
+	}
+}
+
 // WithCustomChannels allows providing external channels for events
 func WithCustomChannels(events chan WatchEvent, dropped chan WatchEvent) WatcherOpt {
 	return func(w *watcher) {
@@ -88,15 +99,17 @@ func WithSeverity(level Severity) WatcherOpt {
 // Each key is a pattern as in [filepath.Match], matched against the base
 // name of each path, and any matching file is ignored. Modify the result
 // of [DefaultIgnores] to watch files that are ignored by default on
-// a platform, such as ".plist" files on macOS, or to ignore other files
-// An empty map ignores no files
+// a platform, such as ".plist" files on macOS, or to ignore other files.
+// To watch hidden files that also match a default pattern, delete that pattern
+// and use [WithHidden].
+// An empty map adds no system or temporary file patterns.
 //
 // Example: watch .plist files on macOS, and ignore *.orig files:
 //
 //	ignores := fswatcher.DefaultIgnores()
 //	delete(ignores, "*.plist")
 //	ignores["*.orig"] = struct{}{}
-//	w, err := fswatcher.New(fswatcher.WithIgnoreList(ignores))
+//	w, err := fswatcher.New(fswatcher.WithIgnoreList(ignores), fswatcher.WithHidden())
 func WithIgnoreList(ignores map[string]struct{}) WatcherOpt {
 	return func(w *watcher) {
 		if w.init != nil {
