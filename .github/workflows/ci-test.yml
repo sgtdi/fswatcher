@@ -95,6 +95,23 @@ jobs:
                   echo "Verifying build for DragonFly BSD..."
                   GOOS=dragonfly go build ./...
 
+                  echo "Verifying BSD test compilation..."
+                  while read -r target_os target_arch; do
+                    echo "Compiling tests for ${target_os}/${target_arch}..."
+                    GOOS="$target_os" GOARCH="$target_arch" CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/fswatcher-${target_os}-${target_arch}.test" .
+                  done <<'EOF'
+                  freebsd amd64
+                  freebsd 386
+                  freebsd arm
+                  openbsd amd64
+                  openbsd 386
+                  openbsd arm
+                  netbsd amd64
+                  netbsd 386
+                  netbsd arm
+                  dragonfly amd64
+                  EOF
+
             - name: "Upload coverage report"
               uses: actions/upload-artifact@v7
               with:
