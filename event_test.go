@@ -3,6 +3,7 @@ package fswatcher
 import (
 	"container/heap"
 	"math/rand"
+	"path/filepath"
 	"slices"
 	"sync"
 	"testing"
@@ -15,7 +16,7 @@ func TestIsSystemFile(t *testing.T) {
 		path     string
 		expected bool
 	}{
-		{"Normal file", "/path/document.docx", false},
+		{"Normal file", filepath.Join(tempDir, "path", "document.docx"), false},
 	}
 
 	if len(osPrefixes) > 0 {
@@ -26,7 +27,7 @@ func TestIsSystemFile(t *testing.T) {
 			name     string
 			path     string
 			expected bool
-		}{"Dynamic system file prefix", "/path/" + randomPrefix + "file", true})
+		}{"Dynamic system file prefix", filepath.Join(tempDir, "path", randomPrefix+"file"), true})
 	}
 
 	if len(osSuffixes) > 0 {
@@ -37,12 +38,12 @@ func TestIsSystemFile(t *testing.T) {
 			name     string
 			path     string
 			expected bool
-		}{"Dynamic system file suffix", "/path/file" + randomSuffix, true})
+		}{"Dynamic system file suffix", filepath.Join(tempDir, "path", "file"+randomSuffix), true})
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			actual := (&watcher{}).isIgnored(tc.path)
+			actual := watcherForHiddenPathTest(tempDir).isIgnored(tc.path)
 			if actual != tc.expected {
 				t.Errorf("isIgnored(%q) = %v; want %v", tc.path, actual, tc.expected)
 			}

@@ -313,8 +313,8 @@ func TestIgnoreList(t *testing.T) {
 		w, err := New(WithPath(tempDir))
 		require.NoError(t, err)
 		ww := w.(*watcher)
-		assert.True(t, ww.isIgnored("/path/file.tmp"))
-		assert.False(t, ww.isIgnored("/path/file.go"))
+		assert.True(t, ww.isIgnored(filepath.Join(tempDir, "file.tmp")))
+		assert.False(t, ww.isIgnored(filepath.Join(tempDir, "file.go")))
 	})
 
 	t.Run("Customized", func(t *testing.T) {
@@ -325,11 +325,11 @@ func TestIgnoreList(t *testing.T) {
 		w, err := New(WithPath(tempDir), WithIgnoreList(ignores))
 		require.NoError(t, err)
 		ww := w.(*watcher)
-		assert.False(t, ww.isIgnored("/path/file.tmp"), "deleted default")
-		assert.True(t, ww.isIgnored("/path/file.orig"), "added pattern")
-		assert.True(t, ww.isIgnored("/path/backup-1.go"), "added pattern")
-		assert.False(t, ww.isIgnored("/path/backup/file.go"), "only the base name is matched")
-		assert.True(t, ww.isIgnored("/path/file.bak"), "other defaults kept")
+		assert.False(t, ww.isIgnored(filepath.Join(tempDir, "file.tmp")), "deleted default")
+		assert.True(t, ww.isIgnored(filepath.Join(tempDir, "file.orig")), "added pattern")
+		assert.True(t, ww.isIgnored(filepath.Join(tempDir, "backup-1.go")), "added pattern")
+		assert.False(t, ww.isIgnored(filepath.Join(tempDir, "backup", "file.go")), "only the base name is matched")
+		assert.True(t, ww.isIgnored(filepath.Join(tempDir, "file.bak")), "other defaults kept")
 		assert.Contains(t, DefaultIgnores(), "*.tmp", "defaults not modified")
 	})
 
@@ -337,8 +337,8 @@ func TestIgnoreList(t *testing.T) {
 		w, err := New(WithPath(tempDir), WithIgnoreList(map[string]struct{}{}))
 		require.NoError(t, err)
 		ww := w.(*watcher)
-		assert.False(t, ww.isIgnored("/path/file.tmp"))
-		assert.False(t, ww.isIgnored("/path/~file"))
+		assert.False(t, ww.isIgnored(filepath.Join(tempDir, "file.tmp")))
+		assert.False(t, ww.isIgnored(filepath.Join(tempDir, "~file")))
 	})
 
 	t.Run("InvalidPattern", func(t *testing.T) {
