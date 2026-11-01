@@ -237,28 +237,26 @@ func goHandleFSEvent(handle C.uintptr_t, numEvents C.size_t, cPaths **C.char, cF
 		flags := uint32(flagsSlice[i])
 		eventID := uint64(idsSlice[i])
 
-		// Handle MustScanSubDirs and dropped events
-		if flags&(FSEventStreamEventFlagMustScanSubDirs|FSEventStreamEventFlagUserDropped|FSEventStreamEventFlagKernelDropped) != 0 {
-			w.logWarn("FSEvents signaling potential data loss", "flags", fmt.Sprintf("%08x", flags), "path", path)
-			go w.scanDirectory(path)
-			continue
-		}
-
-		genericTypes := parseGenericEventFlags(flags)
-		if len(genericTypes) == 0 {
-			continue // Skip events we can't map to a generic type
-		}
-
-		event := WatchEvent{
-			ID:    eventID,
-			Path:  path,
-			Types: genericTypes,
-			Flags: parseDarwinEventFlags(flags),
-			Time:  currentTime,
-		}
-
-		w.handlePlatformEvent(event)
+		w.handleDarwinEvent(path, flags, eventID, currentTime)
 	}
+}
+
+// handleDarwinEvent handles native flags before generic filtering. Attribute
+// changes arrive as InodeMetaMod/FinderInfoMod, not only ChangeOwner.
+func (w *watcher) handleDarwinEvent(path string, flags uint32, id uint64, now time.Time) {
+	if flags&(FSEventStreamEventFlagItemInodeMetaMod|FSEventStreamEventFlagItemFinderInfoMod|FSEventStreamEventFlagItemXattrMod|FSEventStreamEventFlagItemChangeOwner) != 0 {
+		w.hiddenAttributeCache.invalidatePath(path)
+	}
+	if flags&(FSEventStreamEventFlagMustScanSubDirs|FSEventStreamEventFlagUserDropped|FSEventStreamEventFlagKernelDropped) != 0 {
+		w.logWarn("FSEvents signaling potential data loss", "flags", fmt.Sprintf("%08x", flags), "path", path)
+		go w.scanDirectory(path)
+		return
+	}
+	types := parseGenericEventFlags(flags)
+	if len(types) == 0 {
+		return
+	}
+	w.handlePlatformEvent(WatchEvent{ID: id, Path: path, Types: types, Flags: parseDarwinEventFlags(flags), Time: now})
 }
 
 // goLogStreamSuccess logs successful stream creation
