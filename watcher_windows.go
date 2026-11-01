@@ -4,7 +4,9 @@ package fswatcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 	"unsafe"
@@ -141,14 +143,15 @@ func (w *watcher) runWindowsLoop(iocp windows.Handle, done chan struct{}) {
 	}
 }
 
-// handleWindowsCompletion always rearms a recoverable overflow. Other failures
-// stop the backend, so Watch cannot remain active with a permanently silent root.
+// handleWindowsCompletion rearms recoverable overflows and retires deleted roots.
+// Other failures stop the backend rather than leave a permanently silent root.
+// The caller must hold streamMu.
 func (w *watcher) handleWindowsCompletion(wp *watchedPath, n uint32, completionErr error, rearm func(*watchedPath) error) error {
 	if completionErr == windows.ERROR_OPERATION_ABORTED {
 		return nil
 	}
 	if completionErr != nil && completionErr != windows.ERROR_NOTIFY_ENUM_DIR && completionErr != windows.ERROR_MORE_DATA {
-		return newError("readCompletion", wp.path, completionErr)
+		return w.handleWindowsReadError(wp, "readCompletion", completionErr)
 	}
 	if completionErr != nil || n == 0 {
 		w.handlePlatformEvent(WatchEvent{Path: wp.path, Types: []EventType{EventOverflow}, Time: time.Now()})
@@ -156,9 +159,44 @@ func (w *watcher) handleWindowsCompletion(wp *watchedPath, n uint32, completionE
 		w.handleWindowsEvents(wp, n)
 	}
 	if err := rearm(wp); err != nil {
-		return newError("rearm", wp.path, err)
+		return w.handleWindowsReadError(wp, "rearm", err)
 	}
 	return nil
+}
+
+// Windows can report a deleted directory as ERROR_ACCESS_DENIED both in an
+// IOCP completion and when rearming its read. Confirm deletion so an actual
+// permission failure on an existing directory is still returned to the caller.
+func (w *watcher) handleWindowsReadError(wp *watchedPath, op string, err error) error {
+	if !wp.wasRemoved(err) {
+		return newError(op, wp.path, err)
+	}
+	if err := w.removeWindowsWatch(wp); err != nil {
+		return newError("removeDeletedWatch", wp.path, err)
+	}
+	w.handlePlatformEvent(WatchEvent{Path: wp.path, Types: []EventType{EventRemove}, Time: time.Now()})
+	return nil
+}
+
+func (wp *watchedPath) wasRemoved(err error) bool {
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) && !errors.Is(err, windows.ERROR_DELETE_PENDING) {
+		return false
+	}
+	// FILE_STANDARD_INFO identifies the original handle even if a new directory
+	// has already been created at the same path.
+	var info struct {
+		AllocationSize int64
+		EndOfFile      int64
+		NumberOfLinks  uint32
+		DeletePending  byte
+		Directory      byte
+	}
+	if windows.GetFileInformationByHandleEx(wp.handle, windows.FileStandardInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))) == nil && info.DeletePending != 0 {
+		return true
+	}
+	// Some filesystems do not support the handle query.
+	_, statErr := os.Stat(wp.path)
+	return errors.Is(statErr, os.ErrNotExist) || errors.Is(statErr, windows.ERROR_DELETE_PENDING)
 }
 
 // handleWindowsEvents parses the buffer from ReadDirectoryChangesW
@@ -268,6 +306,14 @@ func (w *watcher) removeWatch(path string) error {
 		return nil
 	}
 	wp := wpAny.(*watchedPath)
+	return w.removeWindowsWatch(wp)
+}
+
+// removeWindowsWatch releases one native registration. The configured root is
+// retained until DropPath, including when Windows first reports its deletion.
+// The caller must hold streamMu.
+func (w *watcher) removeWindowsWatch(wp *watchedPath) error {
+	path := wp.path
 	pathMap := w.streams["pathMap"].(map[uintptr]*watchedPath)
 
 	// Try to cancel any pending I/O operations
