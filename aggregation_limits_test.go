@@ -4,46 +4,51 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
 func TestAggregationMaxWaitDeliversContinuouslyChangingFile(t *testing.T) {
-	wi, err := New(WithPath(t.TempDir()), WithCooldown(100*time.Millisecond), WithMaxWait(200*time.Millisecond))
-	require.NoError(t, err)
-	w := wi.(*watcher)
-	defer w.aggregator.close()
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-	timeout := time.NewTimer(time.Second)
-	defer timeout.Stop()
-	w.aggregator.addEvent(WatchEvent{Path: "hot-file", Types: []EventType{EventMod}})
-	for {
-		select {
-		case <-ticker.C:
-			w.aggregator.addEvent(WatchEvent{Path: "hot-file", Types: []EventType{EventMod}})
-		case event := <-w.Events():
-			require.Equal(t, "hot-file", event.Path)
-			require.Greater(t, w.Stats().EventsCoalesced, int64(5))
-			return
-		case <-timeout.C:
-			t.Fatal("continuous changes postponed delivery beyond max wait")
+	synctest.Test(t, func(t *testing.T) {
+		const maxWait = 200 * time.Millisecond
+		const interval = 5 * time.Millisecond
+		w := &watcher{events: make(chan WatchEvent, 1), maxWait: maxWait}
+		ea := newEventAggregator(w, 100*time.Millisecond)
+		defer ea.close()
+		start := time.Now()
+		ea.addEvent(WatchEvent{Path: "hot-file", Types: []EventType{EventMod}})
+		for elapsed := interval; elapsed < maxWait; elapsed += interval {
+			time.Sleep(interval)
+			ea.addEvent(WatchEvent{Path: "hot-file", Types: []EventType{EventMod}})
 		}
-	}
+		synctest.Wait()
+		require.Empty(t, w.events, "continuous changes must postpone delivery until max wait")
+		time.Sleep(interval)
+		synctest.Wait()
+		require.Len(t, w.events, 1, "continuous changes must not postpone delivery beyond max wait")
+		require.Equal(t, maxWait, time.Since(start))
+		require.Equal(t, "hot-file", (<-w.events).Path)
+		require.Equal(t, int64(39), w.Stats().EventsCoalesced)
+	})
 }
 
 func TestAggregationMaxWaitCanBeShorterThanCooldown(t *testing.T) {
-	wi, err := New(WithPath(t.TempDir()), WithCooldown(time.Second), WithMaxWait(10*time.Millisecond))
-	require.NoError(t, err)
-	w := wi.(*watcher)
-	defer w.aggregator.close()
-	w.aggregator.addEvent(WatchEvent{Path: "file", Types: []EventType{EventMod}})
-	select {
-	case <-w.Events():
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("single event ignored max wait")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		const maxWait = 10 * time.Millisecond
+		w := &watcher{events: make(chan WatchEvent, 1), maxWait: maxWait}
+		ea := newEventAggregator(w, time.Second)
+		defer ea.close()
+		ea.addEvent(WatchEvent{Path: "file", Types: []EventType{EventMod}})
+		time.Sleep(maxWait - time.Millisecond)
+		synctest.Wait()
+		require.Empty(t, w.events, "event must remain pending until max wait")
+		time.Sleep(time.Millisecond)
+		synctest.Wait()
+		require.Len(t, w.events, 1, "single event ignored max wait")
+		require.Equal(t, "file", (<-w.events).Path)
+	})
 }
 
 func TestAggregationCapacityFlushesWithoutLosingPaths(t *testing.T) {
