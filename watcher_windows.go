@@ -92,6 +92,8 @@ func (w *watcher) startPlatform(ctx context.Context) (<-chan struct{}, error) {
 // runWindowsLoop is the main event processing loop for Windows
 func (w *watcher) runWindowsLoop(iocp windows.Handle, done chan struct{}) {
 	defer func() {
+		w.lockPlatformShutdown()
+		defer w.opsMu.Unlock()
 		w.logDebug("Windows platform shutting down")
 		w.streamMu.Lock()
 		if pathMap, ok := w.streams["pathMap"].(map[uintptr]*watchedPath); ok {

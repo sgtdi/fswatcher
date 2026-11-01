@@ -59,6 +59,8 @@ func (w *watcher) startPlatform(ctx context.Context) (<-chan struct{}, error) {
 func (w *watcher) runKqueueLoop(ctx context.Context, k *kqueue, done chan struct{}) {
 	// Closes all open descriptors and kqueue instance
 	defer func() {
+		w.lockPlatformShutdown()
+		defer w.opsMu.Unlock()
 		w.logDebug("kqueue platform shutting down")
 		k.mu.Lock()
 		for fd := range k.wds {

@@ -135,6 +135,8 @@ func setupEpoll(inotifyFD, eventFD int) (int, error) {
 // runInotifyLoop reads inotify events using epoll for efficiency and forwards them as WatchEvents
 func (w *watcher) runInotifyLoop(ctx context.Context, p *inotify, done chan struct{}) {
 	defer func() {
+		w.lockPlatformShutdown()
+		defer w.opsMu.Unlock()
 		w.logDebug("inotify platform shutting down")
 		p.mu.RLock()
 		var wds []int

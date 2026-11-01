@@ -237,112 +237,96 @@ func (w *watcher) Watch(ctx context.Context) (retErr error) {
 	if !w.isUsed.CompareAndSwap(false, true) {
 		return newError("start", "", errors.New("watcher is single-use; create a new watcher instance"))
 	}
-
-	if err := w.initLogger(); err != nil {
-		return err
+	var platformDone <-chan struct{}
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	startup := false
+	watchCtx, cancel := context.WithCancel(ctx)
 	defer func() {
-		if retErr == nil || startup {
-			return
+		cancel()
+		if platformDone != nil {
+			<-platformDone
+		}
+		w.opsMu.Lock()
+		w.isShuttingDown.Store(true)
+		w.isRunning.Store(false)
+		w.opsMu.Unlock()
+		w.aggregator.close()
+		if w.ownsEventsChannel {
+			close(w.events)
+		}
+		if w.ownsDroppedChannel {
+			close(w.dropped)
 		}
 		w.logMu.Lock()
-		defer w.logMu.Unlock()
 		if w.logFile != nil {
 			_ = w.logFile.Close()
 			w.logFile = nil
 		}
+		w.logMu.Unlock()
 	}()
 
-	if w.severity <= SeverityDebug {
-		w.logDebug("Watcher configuration",
-			"cooldown", w.cooldown,
-			"bufferSize", w.bufferSize)
-		w.pathMu.RLock()
-		paths := make([]string, 0, len(w.watchedPaths))
-		for p := range w.watchedPaths {
-			paths = append(paths, p)
-		}
-		w.pathMu.RUnlock()
-		w.logDebug("Watcher paths", "paths", paths)
+	if err := w.initLogger(); err != nil {
+		return err
 	}
-
-	if !w.isRunning.CompareAndSwap(false, true) {
-		return newError("start", "", errors.New("watcher is already running"))
-	}
-	defer w.isRunning.Store(false)
-
-	watchCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	w.scanCtx = watchCtx
-
 	go func() {
 		select {
 		case <-w.done:
-		case <-ctx.Done():
+			cancel()
+		case <-watchCtx.Done():
 		}
-		cancel()
 	}()
 
-	// Start the platform-specific watching mechanism
-	done, err := w.startPlatform(watchCtx)
+	// Serialize initialization and runtime operations with backend cleanup.
+	w.opsMu.Lock()
+	w.scanCtx = watchCtx
+	w.isRunning.Store(true)
+	var err error
+	platformDone, err = w.startPlatform(watchCtx)
 	if err != nil {
+		w.opsMu.Unlock()
 		return err
 	}
-
-	// Start watching the initial set of paths synchronously
-	// If any path fails to initialize, fail fast and return an error
 	w.pathMu.RLock()
 	initialPaths := make([]*WatchPath, 0, len(w.watchedPaths))
 	for _, wp := range w.watchedPaths {
 		initialPaths = append(initialPaths, wp)
 	}
 	w.pathMu.RUnlock()
-
-	for _, watchPath := range initialPaths {
-		if err := w.addWatch(watchPath); err != nil {
-			cancel()
-			<-done
-			return newError("startWatch", watchPath.Path, err)
+	for _, path := range initialPaths {
+		if watchCtx.Err() != nil {
+			w.opsMu.Unlock()
+			return nil
+		}
+		if err := w.addWatch(path); err != nil {
+			w.opsMu.Unlock()
+			return newError("startWatch", path.Path, err)
 		}
 	}
-
+	if watchCtx.Err() != nil {
+		w.opsMu.Unlock()
+		return nil
+	}
 	if w.readyChan != nil {
 		close(w.readyChan)
 	}
-	startup = true
-
-	// A backend can exhaust its retry budget and stop while the caller's
-	// context is still active. Don't leave Watch blocked in that case.
-	if err := waitForWatchStop(watchCtx, done); err != nil {
-		retErr = newError("watch", "", err)
+	w.opsMu.Unlock()
+	if err := waitForWatchStop(watchCtx, platformDone); err != nil {
+		return newError("watch", "", err)
 	}
+	return nil
+}
 
-	// Wait for the platform watcher to shut down completely
-	<-done
-
-	w.logInfo("Watcher shutting down...")
+// lockPlatformShutdown prevents runtime operations from attaching watches to
+// resources that the backend is about to release. Callers must unlock opsMu.
+func (w *watcher) lockPlatformShutdown() {
+	w.opsMu.Lock()
 	w.isShuttingDown.Store(true)
+	w.isRunning.Store(false)
+}
 
-	if w.aggregator != nil {
-		w.aggregator.close()
-	}
-
-	if w.ownsEventsChannel {
-		close(w.events)
-	}
-	if w.ownsDroppedChannel {
-		close(w.dropped)
-	}
-
-	w.logInfo("Watcher shutdown completed")
-
-	if w.logFile != nil {
-		if err := w.logFile.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "fswatcher: error closing log file: %v\n", err)
-		}
-	}
-	return retErr
+func (w *watcher) canChangePaths() bool {
+	return w.IsRunning() && !w.isShuttingDown.Load() && (w.scanCtx == nil || w.scanCtx.Err() == nil)
 }
 
 func waitForWatchStop(ctx context.Context, platformDone <-chan struct{}) error {
@@ -363,13 +347,13 @@ func (w *watcher) AddPath(path string, options ...PathOption) error {
 	if !w.IsRunning() {
 		return newError("AddPath", path, errors.New("watcher is not running"))
 	}
-	w.opsMu.Lock()
-	defer w.opsMu.Unlock()
-
+	// Apply caller options before acquiring the lifecycle lock.
 	// Create a temporary WatchPath to apply options
 	watchPath := &WatchPath{Path: path, Depth: WatchNested}
 	for _, opt := range options {
-		opt(watchPath)
+		if opt != nil {
+			opt(watchPath)
+		}
 	}
 
 	wp, err := validateWatchPath(watchPath.Path, watchPath.Depth)
@@ -387,6 +371,12 @@ func (w *watcher) AddPath(path string, options ...PathOption) error {
 			return err
 		}
 		wp.filter = f
+	}
+
+	w.opsMu.Lock()
+	defer w.opsMu.Unlock()
+	if !w.canChangePaths() {
+		return newError("AddPath", path, errors.New("watcher is not running"))
 	}
 
 	w.pathMu.Lock()
@@ -417,6 +407,9 @@ func (w *watcher) DropPath(path string) error {
 	}
 	w.opsMu.Lock()
 	defer w.opsMu.Unlock()
+	if !w.canChangePaths() {
+		return newError("DropPath", path, errors.New("watcher is not running"))
+	}
 
 	wp, err := cleanWatchPath(path)
 	if err != nil {

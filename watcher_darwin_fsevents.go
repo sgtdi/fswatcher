@@ -302,6 +302,8 @@ func (w *watcher) startPlatform(ctx context.Context) (<-chan struct{}, error) {
 
 	go func() {
 		<-ctx.Done()
+		w.lockPlatformShutdown()
+		defer w.opsMu.Unlock()
 		w.logDebug("Platform backend shutting down")
 		watcherMap.Delete(w.handle)
 

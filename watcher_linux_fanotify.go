@@ -104,6 +104,8 @@ func newFanotify() (*fanotify, error) {
 // runFanotifyLoop reads fanotify events and forwards them as WatchEvents
 func (w *watcher) runFanotifyLoop(ctx context.Context, p *fanotify, done chan struct{}) {
 	defer func() {
+		w.lockPlatformShutdown()
+		defer w.opsMu.Unlock()
 		w.logDebug("fanotify platform shutting down...")
 		p.closeMarks()
 

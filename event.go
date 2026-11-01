@@ -57,15 +57,18 @@ func (we WatchEvent) String() string {
 
 // EventAggregator merges multiple events for the same path over a short duration
 type EventAggregator struct {
-	events    map[string]*aggregatedEvent
-	deadlines deadlineHeap
-	cooldown  time.Duration
-	watcher   *watcher
-	mu        sync.Mutex
-	isClosed  atomic.Bool
-	started   atomic.Bool
-	wake      chan struct{}
-	done      chan struct{}
+	events     map[string]*aggregatedEvent
+	deadlines  deadlineHeap
+	cooldown   time.Duration
+	watcher    *watcher
+	mu         sync.Mutex
+	isClosed   atomic.Bool
+	started    atomic.Bool
+	closeOnce  sync.Once
+	worker     sync.WaitGroup
+	deliveries sync.WaitGroup
+	wake       chan struct{}
+	done       chan struct{}
 }
 
 // aggregatedEvent holds merged data for events on the same path
@@ -154,14 +157,17 @@ func (ea *EventAggregator) addEvent(event WatchEvent) {
 	if ea.isClosed.Load() {
 		return
 	}
-	if ea.started.CompareAndSwap(false, true) {
-		go ea.run()
-	}
-
 	ea.mu.Lock()
 	defer ea.mu.Unlock()
 	if ea.isClosed.Load() {
 		return
+	}
+	if ea.started.CompareAndSwap(false, true) {
+		ea.worker.Add(1)
+		go func() {
+			defer ea.worker.Done()
+			ea.run()
+		}()
 	}
 
 	now := time.Now()
@@ -350,29 +356,32 @@ func (ea *EventAggregator) flushPath(path string, version uint64, force bool) {
 		Time:  aggregated.lastSeen,
 	}
 
+	ea.deliveries.Add(1)
 	ea.mu.Unlock()
+	defer ea.deliveries.Done()
 	ea.watcher.sendToChannel(event)
 }
 
 // close stops the aggregator and flushes any remaining events
 func (ea *EventAggregator) close() {
-	if !ea.isClosed.CompareAndSwap(false, true) {
-		return
-	}
-	close(ea.done)
-
-	ea.mu.Lock()
-	// Copy paths to avoid modification during iteration
-	paths := make([]string, 0, len(ea.events))
-	for path := range ea.events {
-		paths = append(paths, path)
-	}
-	ea.mu.Unlock()
-
-	// Flush everything immediately
-	for _, path := range paths {
-		ea.flushPath(path, 0, true)
-	}
+	ea.closeOnce.Do(func() {
+		ea.mu.Lock()
+		ea.isClosed.Store(true)
+		close(ea.done)
+		ea.mu.Unlock()
+		// Join the timer worker before channels can be closed by Watch.
+		ea.worker.Wait()
+		ea.mu.Lock()
+		paths := make([]string, 0, len(ea.events))
+		for path := range ea.events {
+			paths = append(paths, path)
+		}
+		ea.mu.Unlock()
+		for _, path := range paths {
+			ea.flushPath(path, 0, true)
+		}
+		ea.deliveries.Wait()
+	})
 }
 
 // uniqueEventTypes removes duplicate EventType values from a slice
