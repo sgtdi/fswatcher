@@ -158,10 +158,7 @@ func (w *watcher) processKqueueEvents(k *kqueue, events []unix.Kevent_t) {
 
 		// Clean up if removed
 		if flags&unix.NOTE_DELETE == unix.NOTE_DELETE || flags&unix.NOTE_RENAME == unix.NOTE_RENAME {
-			delete(k.wds, fd)
-			delete(k.paths, path)
-			delete(k.dirs, path)
-			unix.Close(fd)
+			removeKqueuePathLocked(k, path)
 		}
 	}
 
@@ -221,8 +218,65 @@ func (w *watcher) scanDirectoryLocked(k *kqueue, dirPath string) {
 					Time:  now,
 				})
 			}
+
+			// kqueue watches directories by descriptor and doesn't inherit a
+			// parent's watch for descendants. Populate a newly discovered tree
+			// explicitly so files already present in a moved-in directory are
+			// monitored immediately.
+			if watchPath := k.w.findMostSpecificWatchPath(dirPath); watchPath != nil && watchPath.Depth == WatchNested {
+				for _, entry := range newEntries {
+					if entry.isDir {
+						if _, watched := k.paths[entry.path]; watched {
+							if err := k.addWatchContentsLocked(entry.path); err != nil {
+								w.logWarn("Failed to add watches for new directory contents", "path", entry.path, "error", err)
+							}
+						}
+					}
+				}
+			}
 		} else {
 			w.logWarn("Failed to add watches for new entries", "error", err)
+		}
+	}
+}
+
+// addWatchContentsLocked registers descendants of a directory that is already
+// watched. The caller must hold k.mu.
+func (k *kqueue) addWatchContentsLocked(root string) error {
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if entry != nil && entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if path == root {
+			return nil
+		}
+		if !k.w.includeHidden && isHiddenPathWithin(path, path) {
+			if entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if k.w.isIgnoredPattern(path) {
+			if entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		return k.addSingleWatchLocked(path)
+	})
+}
+
+func removeKqueuePathLocked(k *kqueue, path string) {
+	cleanPath := filepath.Clean(path)
+	for watchedPath, fd := range k.paths {
+		if watchedPath == cleanPath || isSubpath(cleanPath, watchedPath) {
+			delete(k.wds, fd)
+			delete(k.paths, watchedPath)
+			delete(k.dirs, watchedPath)
+			_ = unix.Close(fd)
 		}
 	}
 }
@@ -379,22 +433,6 @@ func (k *kqueue) removeWatch(path string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
-	cleanPath := filepath.Clean(path)
-	var fdsToRemove []int
-
-	for p, fd := range k.paths {
-		if p == cleanPath || (len(p) > len(cleanPath) && p[len(cleanPath)] == filepath.Separator && p[:len(cleanPath)] == cleanPath) {
-			fdsToRemove = append(fdsToRemove, fd)
-		}
-	}
-
-	for _, fd := range fdsToRemove {
-		p := k.wds[fd]
-		delete(k.wds, fd)
-		delete(k.paths, p)
-		delete(k.dirs, p)
-		unix.Close(fd)
-	}
-
+	removeKqueuePathLocked(k, path)
 	return nil
 }

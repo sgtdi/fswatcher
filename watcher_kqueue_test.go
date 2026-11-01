@@ -294,6 +294,56 @@ func TestAddWatch(t *testing.T) {
 	assert.True(t, k.dirs[subDir])
 }
 
+func TestKqueueWatchesMovedInDirectoryTreeAndRemovesRenamedTree(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	movedSource := filepath.Join(outside, "populated")
+	nested := filepath.Join(movedSource, "nested")
+	require.NoError(t, os.MkdirAll(nested, 0o700))
+	file := filepath.Join(nested, "existing.txt")
+	require.NoError(t, os.WriteFile(file, []byte("data"), 0o600))
+
+	w, err := New(WithPath(root), WithSeverity(SeverityNone))
+	require.NoError(t, err)
+	wImpl := w.(*watcher)
+	k, err := newKqueue(wImpl)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		wImpl.aggregator.close()
+		closeKqueueForTest(k)
+	})
+
+	wp, err := validateWatchPath(root, WatchNested)
+	require.NoError(t, err)
+	require.NoError(t, k.addWatch(wp))
+
+	movedPath := filepath.Join(root, "populated")
+	require.NoError(t, os.Rename(movedSource, movedPath))
+	k.mu.Lock()
+	wImpl.scanDirectoryLocked(k, root)
+	_, hasMovedDir := k.paths[movedPath]
+	_, hasNestedDir := k.paths[filepath.Join(movedPath, "nested")]
+	_, hasExistingFile := k.paths[filepath.Join(movedPath, "nested", "existing.txt")]
+	k.mu.Unlock()
+	assert.True(t, hasMovedDir, "moved directory should be watched")
+	assert.True(t, hasNestedDir, "existing nested directory should be watched")
+	assert.True(t, hasExistingFile, "existing file should be watched")
+
+	movedOut := filepath.Join(outside, "moved-out")
+	require.NoError(t, os.Rename(movedPath, movedOut))
+	k.mu.Lock()
+	fd := k.paths[movedPath]
+	k.mu.Unlock()
+	require.NotZero(t, fd)
+	wImpl.processKqueueEvents(k, []unix.Kevent_t{{Ident: kqueueIdent(fd), Fflags: unix.NOTE_RENAME}})
+
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	assert.NotContains(t, k.paths, movedPath)
+	assert.NotContains(t, k.paths, filepath.Join(movedPath, "nested"))
+	assert.NotContains(t, k.paths, filepath.Join(movedPath, "nested", "existing.txt"))
+}
+
 func TestKqueueAddWatchHiddenPaths(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
