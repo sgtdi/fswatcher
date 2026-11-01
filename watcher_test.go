@@ -20,6 +20,13 @@ import (
 
 var tempDir string
 
+func canonicalTempDir(t testing.TB) string {
+	t.Helper()
+	path, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	return path
+}
+
 // mockWriter is a thread-safe io.Writer for capturing log messages
 type mockWriter struct {
 	mu       sync.Mutex

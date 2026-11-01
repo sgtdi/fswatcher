@@ -104,6 +104,7 @@ type watcher struct {
 	paths        []*WatchPath
 	watchedPaths map[string]*WatchPath
 	watchAliases map[string]string
+	rootIndex    *watchRootNode
 	pathMu       sync.RWMutex
 	opsMu        sync.Mutex
 
@@ -192,6 +193,7 @@ func New(options ...WatcherOpt) (Watcher, error) {
 		w.watchedPaths[wp.Path] = wp
 		w.watchAliases[wp.requestedPath] = wp.Path
 	}
+	w.rebuildRootIndexLocked()
 	w.paths = nil
 
 	// Create channels
@@ -401,12 +403,14 @@ func (w *watcher) AddPath(path string, options ...PathOption) error {
 	}
 	// Reserve first so concurrent AddPath calls for the same path are deterministic
 	w.watchedPaths[wp.Path] = wp
+	w.rebuildRootIndexLocked()
 	w.pathMu.Unlock()
 
 	w.hiddenAttributeCache.invalidateAll()
 	if err := w.addWatch(wp); err != nil {
 		w.pathMu.Lock()
 		delete(w.watchedPaths, wp.Path)
+		w.rebuildRootIndexLocked()
 		w.pathMu.Unlock()
 		_ = w.removeWatch(wp.Path)
 		return err
@@ -458,6 +462,7 @@ func (w *watcher) DropPath(path string) error {
 			delete(w.watchAliases, alias)
 		}
 	}
+	w.rebuildRootIndexLocked()
 	w.pathMu.Unlock()
 
 	w.logInfo("Successfully removed watch path", "path", wp.Path)
@@ -788,22 +793,10 @@ func (w *watcher) resetBackoff(state *backoffState) {
 
 // findMostSpecificWatchPath resolves the most specific watched root for a path
 func (w *watcher) findMostSpecificWatchPath(path string) *WatchPath {
+	w.ensureRootIndex()
 	w.pathMu.RLock()
 	defer w.pathMu.RUnlock()
-
-	var parentWatch *WatchPath
-	bestMatchLen := -1
-
-	for watchedDir, wp := range w.watchedPaths {
-		if path == watchedDir || isSubpath(watchedDir, path) {
-			if n := len(watchedDir); n > bestMatchLen {
-				bestMatchLen = n
-				parentWatch = wp
-			}
-		}
-	}
-
-	return parentWatch
+	return w.rootIndex.find(path)
 }
 
 // nativeWatchNeeded reports whether a configured root still needs a descriptor
@@ -847,6 +840,10 @@ func (w *watcher) handlePlatformEvent(event WatchEvent) {
 
 	// Platform-agnostic depth filtering
 	parentWatch := w.findMostSpecificWatchPath(event.Path)
+	if parentWatch == nil {
+		atomic.AddInt64(&w.stats.eventsFiltered, 1)
+		return
+	}
 
 	// If the parent watch is configured for top-level only, check the depth
 	if parentWatch != nil && parentWatch.Depth == WatchTopLevel {

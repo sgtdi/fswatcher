@@ -33,7 +33,7 @@ func BenchmarkKqueueAddWatch(b *testing.B) {
 		filesPerDir = 50
 	)
 
-	root := b.TempDir()
+	root := canonicalTempDir(b)
 	createKqueueBenchmarkTree(b, root, dirs, filesPerDir)
 
 	wIface, err := New()

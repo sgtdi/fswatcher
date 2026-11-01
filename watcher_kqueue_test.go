@@ -17,7 +17,7 @@ import (
 
 // TestKqueue_Backend tests the kqueue backend initialization
 func TestKqueue_Backend(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := canonicalTempDir(t)
 
 	readyChan := make(chan struct{})
 	w, err := New(
@@ -160,7 +160,7 @@ func TestRunKqueueLoop(t *testing.T) {
 
 func TestProcessKqueueEvents(t *testing.T) {
 	// Create a temp file
-	tmpFile, err := os.CreateTemp("", "test_event_*.txt")
+	tmpFile, err := os.CreateTemp(tempDir, "test_event_*.txt")
 	require.NoError(t, err)
 	defer os.Remove(tmpFile.Name())
 	tmpFile.Close()
@@ -211,7 +211,7 @@ func TestProcessKqueueEvents(t *testing.T) {
 }
 
 func TestScanDirectoryLocked(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "test_scan_dir_*")
+	tmpDir, err := os.MkdirTemp(tempDir, "test_scan_dir_*")
 	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
 
@@ -255,7 +255,7 @@ func TestScanDirectoryLocked(t *testing.T) {
 }
 
 func TestAddWatch(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "test_add_watch_*")
+	tmpDir, err := os.MkdirTemp(tempDir, "test_add_watch_*")
 	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
 
@@ -295,8 +295,8 @@ func TestAddWatch(t *testing.T) {
 }
 
 func TestKqueueWatchesMovedInDirectoryTreeAndRemovesRenamedTree(t *testing.T) {
-	root := t.TempDir()
-	outside := t.TempDir()
+	root := canonicalTempDir(t)
+	outside := canonicalTempDir(t)
 	movedSource := filepath.Join(outside, "populated")
 	nested := filepath.Join(movedSource, "nested")
 	require.NoError(t, os.MkdirAll(nested, 0o700))
@@ -345,7 +345,7 @@ func TestKqueueWatchesMovedInDirectoryTreeAndRemovesRenamedTree(t *testing.T) {
 }
 
 func TestKqueueTopLevelWatchesOnlyDirectChildren(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	nested := filepath.Join(root, "child", "nested")
 	require.NoError(t, os.MkdirAll(nested, 0o700))
 	rootFile := filepath.Join(root, "root.txt")
@@ -405,7 +405,7 @@ func TestKqueueAddWatchHiddenPaths(t *testing.T) {
 		{name: "WithHidden includes hidden paths", includeHidden: true, wantHidden: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := canonicalTempDir(t)
 			hiddenDir := filepath.Join(root, ".hidden")
 			hiddenFile := filepath.Join(root, ".secret")
 			visibleDir := filepath.Join(root, "visible")
@@ -455,7 +455,7 @@ func TestKqueueScanDirectorySkipsHiddenPaths(t *testing.T) {
 		{name: "WithHidden includes hidden paths", includeHidden: true, wantHidden: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := canonicalTempDir(t)
 			options := []WatcherOpt{WithPath(root)}
 			if tc.includeHidden {
 				options = append(options, WithHidden())
@@ -514,7 +514,7 @@ func closeKqueueForTest(k *kqueue) {
 }
 
 func TestAddSingleWatchLocked(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "test_single_watch_*.txt")
+	tmpFile, err := os.CreateTemp(tempDir, "test_single_watch_*.txt")
 	require.NoError(t, err)
 	defer os.Remove(tmpFile.Name())
 	tmpFile.Close()
@@ -544,7 +544,7 @@ func TestAddSingleWatchLocked(t *testing.T) {
 }
 
 func TestRemoveWatch(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "test_remove_watch_*")
+	tmpDir, err := os.MkdirTemp(tempDir, "test_remove_watch_*")
 	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
 
@@ -580,7 +580,7 @@ func TestKqueueCancellationDoesNotDependOnCooldown(t *testing.T) {
 	for _, cooldown := range []time.Duration{0, MaxCooldownDuration} {
 		t.Run(cooldown.String(), func(t *testing.T) {
 			ready := make(chan struct{})
-			w, err := New(WithPath(t.TempDir()), WithCooldown(cooldown), WithReadyChannel(ready), WithSeverity(SeverityNone))
+			w, err := New(WithPath(canonicalTempDir(t)), WithCooldown(cooldown), WithReadyChannel(ready), WithSeverity(SeverityNone))
 			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			stopped := make(chan error, 1)
