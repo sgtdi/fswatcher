@@ -93,6 +93,7 @@ func (n *pathTrieNode) findAllChildren() []int {
 
 // inotify is the inotify platform implementation
 type inotify struct {
+	w    *watcher
 	fd   int                // inotify fd
 	wds  map[int]*WatchPath // wd -> WatchPath config mapping
 	trie *pathTrieNode      // Trie for efficient path prefix lookups
@@ -283,8 +284,10 @@ func (w *watcher) handleInotifyEvent(p *inotify, e *unix.InotifyEvent, now time.
 
 	isDir := (e.Mask & unix.IN_ISDIR) != 0
 	if isDir && (e.Mask&(unix.IN_CREATE|unix.IN_MOVED_TO) != 0) {
-		if parentWatch.Depth != WatchTopLevel {
-			p.addWatch(w, &WatchPath{Path: path, Depth: WatchNested})
+		if w.nativeWatchNeeded(path, "", false) {
+			if err := p.addWatch(w, &WatchPath{Path: path, Depth: WatchNested}); err != nil {
+				w.logWarn("Failed to watch new directory", "path", path, "error", err)
+			}
 		}
 	}
 
@@ -354,6 +357,9 @@ func mapInotifyMask(mask uint32) []EventType {
 
 // addWatch attaches a watch to a directory
 func (p *inotify) addWatch(w *watcher, watchPath *WatchPath) error {
+	p.mu.Lock()
+	p.w = w
+	p.mu.Unlock()
 	path := watchPath.Path
 	watchRoot := path
 	isWatchRoot := false
@@ -365,13 +371,6 @@ func (p *inotify) addWatch(w *watcher, watchPath *WatchPath) error {
 	if hiddenPath && !isWatchRoot {
 		return nil
 	}
-
-	p.mu.RLock()
-	if node := p.trie.findNode(path); node != nil && node.wd != -1 {
-		p.mu.RUnlock()
-		return fmt.Errorf("path %s is already being monitored", path)
-	}
-	p.mu.RUnlock()
 
 	wd, err := unix.InotifyAddWatch(p.fd, path, inotifyMask())
 	if err != nil {
@@ -429,53 +428,27 @@ func (p *inotify) addWatch(w *watcher, watchPath *WatchPath) error {
 
 // removeWatch removes inotify watches for a path and all its child paths
 func (p *inotify) removeWatch(path string) error {
-	p.mu.RLock()
-	node := p.trie.findNode(path)
-	if node == nil {
-		p.mu.RUnlock()
-		// The kernel can invalidate and remove inotify watches as soon as a
-		// watched directory is deleted. The public watch entry remains until
-		// DropPath is called, so absence in the backend is already removed.
-		return nil
-	}
-
-	// Hold the read lock during the entire traversal
-	wdsToRemove := node.findAllChildren()
-	p.mu.RUnlock()
-
-	if len(wdsToRemove) == 0 {
-		// Keep the trie consistent after IN_IGNORED events for deleted paths.
-		p.mu.Lock()
-		newTrie := newPathTrieNode()
-		for wd, wp := range p.wds {
-			if wp != nil {
-				newTrie.insert(wp.Path, wd)
-			}
-		}
-		p.trie = newTrie
-		p.mu.Unlock()
-		return nil
-	}
-
-	for _, wd := range wdsToRemove {
-		_, _ = unix.InotifyRmWatch(p.fd, uint32(wd))
-	}
-
 	p.mu.Lock()
-	for _, wd := range wdsToRemove {
-		delete(p.wds, wd)
-	}
-
-	// Rebuild trie from remaining watch descriptors to keep internal state consistent
-	newTrie := newPathTrieNode()
+	defer p.mu.Unlock()
 	for wd, wp := range p.wds {
-		if wp == nil {
+		if wp == nil || (wp.Path != path && !isSubpath(path, wp.Path)) {
 			continue
 		}
-		newTrie.insert(wp.Path, wd)
+		if p.w != nil && p.w.nativeWatchNeeded(wp.Path, path, false) {
+			continue
+		}
+		_, _ = unix.InotifyRmWatch(p.fd, uint32(wd))
+		delete(p.wds, wd)
 	}
-	p.trie = newTrie
-	p.mu.Unlock()
-
+	p.rebuildTrieLocked()
 	return nil
+}
+
+func (p *inotify) rebuildTrieLocked() {
+	p.trie = newPathTrieNode()
+	for wd, wp := range p.wds {
+		if wp != nil {
+			p.trie.insert(wp.Path, wd)
+		}
+	}
 }

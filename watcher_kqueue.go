@@ -453,6 +453,14 @@ func (k *kqueue) removeWatch(path string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
-	removeKqueuePathLocked(k, path)
+	path = filepath.Clean(path)
+	for watched, fd := range k.paths {
+		if (watched == path || isSubpath(path, watched)) && !k.w.nativeWatchNeeded(watched, path, true) {
+			delete(k.wds, fd)
+			delete(k.paths, watched)
+			delete(k.dirs, watched)
+			_ = unix.Close(fd)
+		}
+	}
 	return nil
 }

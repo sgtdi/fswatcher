@@ -735,6 +735,23 @@ func (w *watcher) findMostSpecificWatchPath(path string) *WatchPath {
 	return parentWatch
 }
 
+// nativeWatchNeeded reports whether a configured root still needs a descriptor
+// for path. kqueue also watches direct children of top-level roots; inotify
+// needs directory descriptors only for recursive roots and explicit roots.
+func (w *watcher) nativeWatchNeeded(path, excludedRoot string, directChildren bool) bool {
+	w.pathMu.RLock()
+	defer w.pathMu.RUnlock()
+	for root, wp := range w.watchedPaths {
+		if root == excludedRoot {
+			continue
+		}
+		if path == root || (wp.Depth == WatchNested && isSubpath(root, path)) || (directChildren && filepath.Dir(path) == root) {
+			return true
+		}
+	}
+	return false
+}
+
 // handlePlatformEvent processes raw events from the OS
 func (w *watcher) handlePlatformEvent(event WatchEvent) {
 	if w.isShuttingDown.Load() {
