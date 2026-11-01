@@ -26,6 +26,7 @@ type fanotify struct {
 	paths           map[string]struct{} // configured watch roots, used for handle resolution
 	roots           map[string]*fanotifyRoot
 	markRefs        map[string]int
+	resolveFn       func(uint64, unix.FileHandle) (string, error)
 	markFn          func(path string, add bool) error // injectable mark operation for tests
 	mountCache      map[uint64]string                 // Cache for FSID to mount path resolution
 	mountCacheOrder []uint64                          // FIFO insertion order for eviction
@@ -213,114 +214,80 @@ func (w *watcher) runFanotifyLoop(ctx context.Context, p *fanotify, done chan st
 }
 
 // parseFanotifyInfo parses the variable length info records to reconstructing the path
-func (w *watcher) parseFanotifyInfo(p *fanotify, infoBuf []byte) (string, error) {
-
-	var dirPath string
-	var fileName string
-
-	offset := 0
-	for offset < len(infoBuf) {
-		// Read the header (Type, Pad, Len)
-		if len(infoBuf[offset:]) < 4 { // min header size
-			break
+func (w *watcher) parseFanotifyInfo(p *fanotify, buf []byte) (string, error) {
+	var fallback string
+	for len(buf) > 0 {
+		if len(buf) < 4 {
+			return "", errors.New("truncated fanotify info header")
 		}
-
-		infoType := uint8(infoBuf[offset])
-		infoLen := binary.LittleEndian.Uint16(infoBuf[offset+2:])
-
-		if int(infoLen) > len(infoBuf[offset:]) || infoLen < 4 {
-			break
+		size := int(binary.NativeEndian.Uint16(buf[2:4]))
+		if size < 4 || size > len(buf) {
+			return "", errors.New("invalid fanotify info length")
 		}
-
-		record := infoBuf[offset : offset+int(infoLen)]
-
-		// Check for FAN_EVENT_INFO_TYPE_DFID_NAME or FAN_EVENT_INFO_TYPE_FID
-		if infoType == unix.FAN_EVENT_INFO_TYPE_DFID_NAME || infoType == unix.FAN_EVENT_INFO_TYPE_FID || infoType == unix.FAN_EVENT_INFO_TYPE_DFID {
-			// Header is 4 bytes, fsid is 8 bytes
-			const headerSize = 4
-			const fsidSize = 8
-
-			if len(record) < headerSize+fsidSize {
-				offset += int(infoLen)
-				continue
-			}
-
-			fsid := binary.LittleEndian.Uint64(record[headerSize : headerSize+fsidSize])
-			handleBytes := record[headerSize+fsidSize:]
-
-			// Try to resolve from cache first
-			cachedPath, exists := p.getMountCache(fsid)
-			if exists {
-				dirPath = cachedPath
-			}
-
-			if dirPath == "" && len(handleBytes) >= 8 {
-				// Parse the C struct into Go's unix.FileHandle
-				fHandleBytes := binary.LittleEndian.Uint32(handleBytes[0:4])
-				fHandleType := int32(binary.LittleEndian.Uint32(handleBytes[4:8]))
-
-				if len(handleBytes) >= 8+int(fHandleBytes) {
-					opaqueHandle := handleBytes[8 : 8+int(fHandleBytes)]
-					fileHandle := unix.NewFileHandle(fHandleType, opaqueHandle)
-
-					resolved, err := p.resolveHandlePath(fsid, fileHandle)
-					if err == nil && resolved != "" {
-						dirPath = resolved
-						// Store in cache for future events on this filesystem.
-						p.setMountCache(fsid, resolved)
-					}
-				}
-			}
-
-			if infoType == unix.FAN_EVENT_INFO_TYPE_DFID_NAME {
-				if len(handleBytes) < 8 {
-					offset += int(infoLen)
-					continue
-				}
-				// We need to skip the file handle struct to find the name
-				fHandleBytes := binary.LittleEndian.Uint32(handleBytes[0:4])
-				handleStructSize := 4 + 4 + int(fHandleBytes)
-
-				if len(handleBytes) > handleStructSize {
-					// Name starts after the handle struct
-					nameBytes := handleBytes[handleStructSize:]
-					nullIdx := bytes.IndexByte(nameBytes, 0)
-					if nullIdx >= 0 {
-						fileName = string(nameBytes[:nullIdx])
-					}
-				}
-			}
+		record := buf[:size]
+		buf = buf[size:]
+		kind := record[0]
+		if kind != unix.FAN_EVENT_INFO_TYPE_DFID_NAME && kind != unix.FAN_EVENT_INFO_TYPE_DFID && kind != unix.FAN_EVENT_INFO_TYPE_FID {
+			continue
 		}
-
-		offset += int(infoLen)
+		if len(record) < 20 {
+			return "", errors.New("truncated fanotify file handle")
+		}
+		fsid := binary.NativeEndian.Uint64(record[4:12])
+		handleSize := uint64(binary.NativeEndian.Uint32(record[12:16]))
+		if handleSize > uint64(len(record)-20) {
+			return "", errors.New("invalid fanotify file handle length")
+		}
+		handleEnd := 20 + int(handleSize)
+		handle := unix.NewFileHandle(int32(binary.NativeEndian.Uint32(record[16:20])), record[20:handleEnd])
+		// FSID identifies a filesystem, not a directory. Resolve every handle;
+		// the mount cache supplies a mount candidate only to OpenByHandleAt.
+		path, err := p.resolveHandlePath(fsid, handle)
+		if err != nil {
+			return "", err
+		}
+		if kind == unix.FAN_EVENT_INFO_TYPE_DFID_NAME {
+			name := record[handleEnd:]
+			end := bytes.IndexByte(name, 0)
+			if end < 0 {
+				return "", errors.New("unterminated fanotify entry name")
+			}
+			return filepath.Join(path, string(name[:end])), nil
+		}
+		fallback = path
 	}
-
-	if dirPath != "" {
-		if fileName != "" {
-			return filepath.Join(dirPath, fileName), nil
-		}
-		return dirPath, nil
+	if fallback != "" {
+		return fallback, nil
 	}
-
-	return "", fmt.Errorf("could not resolve path from handle")
+	return "", errors.New("could not resolve path from handle")
 }
 
 func (p *fanotify) watchedPathsSnapshot(fsid uint64) []string {
+	cached, _ := p.getMountCache(fsid)
 	p.mu.RLock()
-	paths := make([]string, 0, len(p.paths)+1)
-	if cached, ok := p.mountCache[fsid]; ok {
-		paths = append(paths, cached)
-	}
-	for path := range p.paths {
-		if path != "" && path != p.mountCache[fsid] {
+	defer p.mu.RUnlock()
+	paths := make([]string, 0, len(p.paths)+len(p.markRefs)+1)
+	seen := make(map[string]bool)
+	add := func(path string) {
+		if path != "" && !seen[path] {
+			seen[path] = true
 			paths = append(paths, path)
 		}
 	}
-	p.mu.RUnlock()
+	add(cached)
+	for path := range p.paths {
+		add(path)
+	}
+	for path := range p.markRefs {
+		add(path)
+	}
 	return paths
 }
 
 func (p *fanotify) resolveHandlePath(fsid uint64, fileHandle unix.FileHandle) (string, error) {
+	if p.resolveFn != nil {
+		return p.resolveFn(fsid, fileHandle)
+	}
 	var lastErr error
 	for _, mountPath := range p.watchedPathsSnapshot(fsid) {
 		mountFD, err := unix.Open(mountPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
@@ -342,6 +309,7 @@ func (p *fanotify) resolveHandlePath(fsid uint64, fileHandle unix.FileHandle) (s
 			lastErr = readErr
 			continue
 		}
+		p.setMountCache(fsid, mountPath)
 		return resolved, nil
 	}
 	if lastErr != nil {
