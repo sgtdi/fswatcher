@@ -14,6 +14,12 @@ import (
 
 func TestWindowsHiddenAttributeFiltering(t *testing.T) {
 	root := t.TempDir()
+	dotPrefixed := filepath.Join(root, ".dot-prefixed.txt")
+	require.NoError(t, os.WriteFile(dotPrefixed, []byte("visible"), 0o600))
+	wDotPrefixed := watcherForHiddenPathTest(root)
+	assert.False(t, wDotPrefixed.isIgnored(dotPrefixed), "dot-prefixed names alone are not hidden on Windows")
+	assert.False(t, wDotPrefixed.isIgnoredForWatch(dotPrefixed, &WatchPath{Path: root}))
+
 	changed := filepath.Join(root, "changed.txt")
 	require.NoError(t, os.WriteFile(changed, []byte("test"), 0o600))
 	wChanged := watcherForHiddenPathTest(root)

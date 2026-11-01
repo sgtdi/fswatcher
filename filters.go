@@ -224,7 +224,12 @@ func isHiddenPathWithin(path, root string) bool {
 }
 
 func (w *watcher) isHiddenPathWithin(path, root string) bool {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "freebsd" && runtime.GOOS != "windows" {
+	if runtime.GOOS == "windows" {
+		return walkPathAncestors(path, root, func(current string) bool {
+			return w.hiddenAttributeCache.isHidden(current, isPlatformHiddenComponent)
+		})
+	}
+	if runtime.GOOS != "darwin" && runtime.GOOS != "freebsd" {
 		return hasHiddenPathComponentWithin(path, root)
 	}
 	return walkPathAncestors(path, root, func(current string) bool {
@@ -233,6 +238,9 @@ func (w *watcher) isHiddenPathWithin(path, root string) bool {
 }
 
 func isPlatformHidden(path, root string) bool {
+	if runtime.GOOS == "windows" {
+		return walkPathAncestors(path, root, isPlatformHiddenComponent)
+	}
 	return walkPathAncestors(path, root, func(current string) bool {
 		return isDotHiddenComponent(current) || isPlatformHiddenComponent(current)
 	})
