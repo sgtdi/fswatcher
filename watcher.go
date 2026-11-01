@@ -17,10 +17,12 @@ import (
 
 // Default values for watcher config
 const (
-	DefaultCooldown       = 100 * time.Millisecond
-	DefaultBufferSize     = 4096
-	DefaultReadBufferSize = 64 * 1024
-	MinReadBufferSize     = 4096
+	DefaultCooldown         = 100 * time.Millisecond
+	DefaultBufferSize       = 4096
+	DefaultReadBufferSize   = 64 * 1024
+	DefaultMaxWait          = time.Second
+	DefaultMaxPendingEvents = 4096
+	MinReadBufferSize       = 4096
 )
 
 // Limits and validation constants
@@ -69,6 +71,9 @@ type watcher struct {
 	// Configuration fields
 	init                 error
 	cooldown             time.Duration
+	maxWait              time.Duration
+	maxWaitSet           bool
+	maxPending           int
 	bufferSize           int
 	readBufferSize       int
 	severity             Severity
@@ -150,6 +155,7 @@ func New(options ...WatcherOpt) (Watcher, error) {
 	w := &watcher{
 		done:               make(chan struct{}),
 		cooldown:           DefaultCooldown,
+		maxPending:         DefaultMaxPendingEvents,
 		bufferSize:         DefaultBufferSize,
 		readBufferSize:     DefaultReadBufferSize,
 		ownsEventsChannel:  true,
@@ -171,6 +177,9 @@ func New(options ...WatcherOpt) (Watcher, error) {
 		return nil, w.init
 	}
 
+	if !w.maxWaitSet {
+		w.maxWait = max(DefaultMaxWait, w.cooldown)
+	}
 	if err := w.validateConfig(); err != nil {
 		return nil, newError("config", "", err)
 	}
@@ -565,6 +574,12 @@ func (w *watcher) validateConfig() error {
 	}
 	if w.readBufferSize < MinReadBufferSize || w.readBufferSize > MaxReadBufferSize {
 		return fmt.Errorf("read buffer size must be between %d and %d", MinReadBufferSize, MaxReadBufferSize)
+	}
+	if w.maxWait < 0 {
+		return errors.New("maximum aggregation wait must not be negative")
+	}
+	if w.maxPending < 1 || w.maxPending > MaxBufferSize {
+		return fmt.Errorf("maximum pending events must be between 1 and %d", MaxBufferSize)
 	}
 	if w.cooldown < 0 || w.cooldown > MaxCooldownDuration {
 		return fmt.Errorf("cooldown must be between 0 and %v", MaxCooldownDuration)

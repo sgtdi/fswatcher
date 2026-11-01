@@ -19,6 +19,20 @@ func WithCooldown(d time.Duration) WatcherOpt {
 	}
 }
 
+// WithMaxWait caps the time events for one path can remain pending, even if
+// changes continue. Zero disables the cap. The default is at least one second
+// and never shorter than the configured cooldown.
+func WithMaxWait(d time.Duration) WatcherOpt {
+	return func(w *watcher) { w.maxWait = d; w.maxWaitSet = true }
+}
+
+// WithMaxPendingEvents bounds aggregation memory. At the limit, a pending
+// event is delivered early before accepting a new path. Channel backpressure
+// continues to use Dropped and EventsLost as usual.
+func WithMaxPendingEvents(limit int) WatcherOpt {
+	return func(w *watcher) { w.maxPending = limit }
+}
+
 // WithBufferSize sets the size of the main event channel
 func WithBufferSize(size int) WatcherOpt {
 	return func(w *watcher) {

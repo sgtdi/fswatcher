@@ -60,6 +60,8 @@ type EventAggregator struct {
 	events     map[string]*aggregatedEvent
 	deadlines  deadlineHeap
 	cooldown   time.Duration
+	maxWait    time.Duration
+	maxPending int
 	watcher    *watcher
 	mu         sync.Mutex
 	isClosed   atomic.Bool
@@ -78,6 +80,7 @@ type aggregatedEvent struct {
 	extraTypes map[EventType]struct{}
 	flags      map[string]struct{}
 	lastSeen   time.Time
+	firstSeen  time.Time
 	eventID    uint64
 	deadline   time.Time
 	version    uint64
@@ -144,11 +147,13 @@ func (event *aggregatedEvent) eventTypes() []EventType {
 // newEventAggregator creates a new event aggregator
 func newEventAggregator(w *watcher, cooldown time.Duration) *EventAggregator {
 	return &EventAggregator{
-		events:   make(map[string]*aggregatedEvent),
-		cooldown: cooldown,
-		watcher:  w,
-		wake:     make(chan struct{}, 1),
-		done:     make(chan struct{}),
+		events:     make(map[string]*aggregatedEvent),
+		cooldown:   cooldown,
+		maxWait:    w.maxWait,
+		maxPending: w.maxPending,
+		watcher:    w,
+		wake:       make(chan struct{}, 1),
+		done:       make(chan struct{}),
 	}
 }
 
@@ -158,8 +163,8 @@ func (ea *EventAggregator) addEvent(event WatchEvent) {
 		return
 	}
 	ea.mu.Lock()
-	defer ea.mu.Unlock()
 	if ea.isClosed.Load() {
+		ea.mu.Unlock()
 		return
 	}
 	if ea.started.CompareAndSwap(false, true) {
@@ -172,9 +177,30 @@ func (ea *EventAggregator) addEvent(event WatchEvent) {
 
 	now := time.Now()
 	deadline := now.Add(ea.cooldown)
+	if ea.maxWait > 0 && ea.maxWait < ea.cooldown {
+		deadline = now.Add(ea.maxWait)
+	}
 
+	var evicted WatchEvent
+	var hasEvicted bool
 	existing, exists := ea.events[event.Path]
+	if !exists && ea.maxPending > 0 && len(ea.events) >= ea.maxPending {
+		var oldest string
+		if len(ea.deadlines) > 0 {
+			oldest = ea.deadlines[0].path
+		} else {
+			for path := range ea.events {
+				oldest = path
+				break
+			}
+		}
+		evicted, hasEvicted = ea.takeEventLocked(oldest, 0, true)
+	}
 	if exists {
+		if ea.maxWait > 0 && deadline.After(existing.firstSeen.Add(ea.maxWait)) {
+			deadline = existing.firstSeen.Add(ea.maxWait)
+		}
+
 		atomic.AddInt64(&ea.watcher.stats.eventsCoalesced, 1)
 		// Update existing event
 		existing.lastSeen = now
@@ -200,6 +226,7 @@ func (ea *EventAggregator) addEvent(event WatchEvent) {
 		existing = &aggregatedEvent{
 			path:      event.Path,
 			lastSeen:  now,
+			firstSeen: now,
 			eventID:   event.ID,
 			deadline:  deadline,
 			version:   1,
@@ -217,6 +244,10 @@ func (ea *EventAggregator) addEvent(event WatchEvent) {
 	}
 
 	ea.signal()
+	ea.mu.Unlock()
+	if hasEvicted {
+		ea.deliver(evicted)
+	}
 }
 
 func (ea *EventAggregator) signal() {
@@ -325,42 +356,33 @@ func (ea *EventAggregator) flushPath(path string, version uint64, force bool) {
 		ea.mu.Unlock()
 		return
 	}
+	event, exists := ea.takeEventLocked(path, version, force)
+	ea.mu.Unlock()
+	if exists {
+		ea.deliver(event)
+	}
+}
 
+func (ea *EventAggregator) takeEventLocked(path string, version uint64, force bool) (WatchEvent, bool) {
 	aggregated, exists := ea.events[path]
-	if !exists {
-		ea.mu.Unlock()
-		return
+	if !exists || (!force && aggregated.version != version) {
+		return WatchEvent{}, false
 	}
-	if !force && aggregated.version != version {
-		ea.mu.Unlock()
-		return
-	}
-
-	// Remove from map before sending to avoid race with new events
 	if aggregated.heapIndex >= 0 {
 		heap.Remove(&ea.deadlines, aggregated.heapIndex)
 	}
 	delete(ea.events, path)
-
-	// Collect unique types and flags
-	types := aggregated.eventTypes()
-
 	flags := make([]string, 0, len(aggregated.flags))
-	for f := range aggregated.flags {
-		flags = append(flags, f)
+	for flag := range aggregated.flags {
+		flags = append(flags, flag)
 	}
 	sort.Strings(flags)
-
-	event := WatchEvent{
-		ID:    aggregated.eventID,
-		Path:  aggregated.path,
-		Types: types,
-		Flags: flags,
-		Time:  aggregated.lastSeen,
-	}
-
+	event := WatchEvent{ID: aggregated.eventID, Path: aggregated.path, Types: aggregated.eventTypes(), Flags: flags, Time: aggregated.lastSeen}
 	ea.deliveries.Add(1)
-	ea.mu.Unlock()
+	return event, true
+}
+
+func (ea *EventAggregator) deliver(event WatchEvent) {
 	defer ea.deliveries.Done()
 	ea.watcher.sendToChannel(event)
 }

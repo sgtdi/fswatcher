@@ -127,6 +127,8 @@ Customize the watcher's behavior using functional options passed to `fswatcher.N
 |:----------------------------| :--- | :--- |
 | `WithPath(path, ...)`       | Adds an initial directory to watch, resolving symbolic links to its canonical absolute path. Can be called multiple times. Accepts optional `PathOption` values like `WithDepth`, `WithEventMask`, `WithPathIncRegex`, etc | Current directory |
 | `WithCooldown(d)`           | Sets the debouncing cooldown period. Events for the same path arriving within this duration will be merged | `100ms` |
+| `WithMaxWait(d)` | Caps aggregation latency for a path during continuous changes. `0` disables the cap | `max(1s, cooldown)` |
+| `WithMaxPendingEvents(n)` | Bounds pending paths; reaching the limit delivers a pending event early | `4096` |
 | `WithBufferSize(size)`      | Sets the size of the main event channel | `4096` |
 | `WithIncRegex(patterns...)` | Global include regex patterns — only matching paths are processed. If not set, all non-excluded paths are processed | (none) |
 | `WithExcRegex(patterns...)` | Global exclude regex patterns — matching paths are ignored. Exclusions take precedence over inclusions | (none) |
