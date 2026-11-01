@@ -16,7 +16,8 @@ import (
 func TestFSEventsMetadataRefreshesHiddenCache(t *testing.T) {
 	for _, flag := range []uint32{FSEventStreamEventFlagItemInodeMetaMod, FSEventStreamEventFlagItemFinderInfoMod, FSEventStreamEventFlagItemXattrMod} {
 		t.Run(fmt.Sprintf("flags_%x", flag), func(t *testing.T) {
-			root := t.TempDir()
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			require.NoError(t, err)
 			path := filepath.Join(root, "visible.dat")
 			require.NoError(t, os.WriteFile(path, []byte("data"), 0600))
 			wi, err := New(WithPath(root), WithSeverity(SeverityNone))
@@ -35,5 +36,19 @@ func TestFSEventsMetadataRefreshesHiddenCache(t *testing.T) {
 			w.aggregator.close()
 			require.Equal(t, path, (<-w.Events()).Path)
 		})
+	}
+}
+
+func TestFSEventsDroppedFlagsEmitOverflow(t *testing.T) {
+	for _, flag := range []uint32{FSEventStreamEventFlagMustScanSubDirs, FSEventStreamEventFlagUserDropped, FSEventStreamEventFlagKernelDropped} {
+		wi, err := New(WithPath(t.TempDir(), WithEventMask(EventRemove)), WithSeverity(SeverityNone))
+		require.NoError(t, err)
+		w := wi.(*watcher)
+		root := w.Paths()[0]
+		w.handleDarwinEvent(root, flag, 1, time.Now())
+		w.scanWorkers.Wait()
+		w.aggregator.close()
+		require.Len(t, w.events, 1)
+		require.Contains(t, (<-w.Events()).Types, EventOverflow)
 	}
 }

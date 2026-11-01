@@ -153,8 +153,10 @@ Once you have a `Watcher` instance from `New()`, you can use the following metho
 | `DropPath(path)` | Stops monitoring a directory at runtime. Accepts the original alias even after that alias is removed. Safe to call concurrently with `AddPath()` |
 | `Close()` | Initiates a graceful shutdown — alternative to canceling the context |
 | `IsRunning()` | Returns `true` if `Watch()` is currently running |
-| `Stats()` | Returns runtime statistics, including processed, coalesced, dropped, filtered, and lost events. `EventsPartial` currently counts inotify subdirectory watches skipped after reaching the system watch limit |
+| `Stats()` | Returns runtime statistics, including processed, coalesced, dropped, filtered, and lost events. `EventsPartial` counts inotify registrations skipped at watch limits or failed during overflow recovery |
 | `Dropped()` | Returns a read-only channel for events dropped because the main `Events()` channel was full |
+
+An `EventOverflow` means some changes were lost. Reconcile your state with the filesystem, including deleted entries. Automatic scans can restore watch coverage and report existing files, but cannot reconstruct every lost change. Native read buffers must be at least 4 KiB; Windows network watches cap buffers at 64 KiB.
 
 ## Logging
 

@@ -20,6 +20,7 @@ const (
 	DefaultCooldown       = 100 * time.Millisecond
 	DefaultBufferSize     = 4096
 	DefaultReadBufferSize = 64 * 1024
+	MinReadBufferSize     = 4096
 )
 
 // Limits and validation constants
@@ -40,7 +41,7 @@ type WatcherStats struct {
 	EventsDropped   int64         // EventsDropped is the count of events sent to the Dropped channel
 	EventsFiltered  int64         // EventsFiltered is the count of events ignored by path, depth, type, or ignore-list filters
 	EventsLost      int64         // EventsLost is the count of events lost when all channels were full
-	EventsPartial   int64         // EventsPartial is the count of inotify subdirectory watches skipped after reaching the system watch limit
+	EventsPartial   int64         // EventsPartial is the count of inotify registrations skipped at watch limits or failed during overflow recovery
 	ProcessingRate  float64       // ProcessingRate is the number of events processed per second
 }
 
@@ -85,11 +86,15 @@ type watcher struct {
 	platformLinux PlatformLinux
 
 	// Channels
-	events    chan WatchEvent
-	dropped   chan WatchEvent
-	done      chan struct{}
-	readyChan chan struct{}
-	scanCtx   context.Context
+	events      chan WatchEvent
+	dropped     chan WatchEvent
+	done        chan struct{}
+	readyChan   chan struct{}
+	scanCtx     context.Context
+	scanMu      sync.Mutex
+	scanPending map[string]struct{}
+	scanWorker  bool
+	scanWorkers sync.WaitGroup
 
 	// Components
 	aggregator *EventAggregator
@@ -254,6 +259,9 @@ func (w *watcher) Watch(ctx context.Context) (retErr error) {
 		w.isShuttingDown.Store(true)
 		w.isRunning.Store(false)
 		w.opsMu.Unlock()
+		w.scanMu.Lock()
+		w.scanMu.Unlock()
+		w.scanWorkers.Wait()
 		w.aggregator.close()
 		if w.ownsEventsChannel {
 			close(w.events)
@@ -550,8 +558,8 @@ func (w *watcher) validateConfig() error {
 	if w.bufferSize <= 0 || w.bufferSize > MaxBufferSize {
 		return fmt.Errorf("buffer size must be between 1 and %d", MaxBufferSize)
 	}
-	if w.readBufferSize <= 0 || w.readBufferSize > MaxReadBufferSize {
-		return fmt.Errorf("read buffer size must be between 1 and %d", MaxReadBufferSize)
+	if w.readBufferSize < MinReadBufferSize || w.readBufferSize > MaxReadBufferSize {
+		return fmt.Errorf("read buffer size must be between %d and %d", MinReadBufferSize, MaxReadBufferSize)
 	}
 	if w.cooldown < 0 || w.cooldown > MaxCooldownDuration {
 		return fmt.Errorf("cooldown must be between 0 and %v", MaxCooldownDuration)
@@ -622,6 +630,50 @@ func (w *watcher) sendToChannel(event WatchEvent) {
 }
 
 // scanDirectory performs a manual scan of a directory and emits events for its contents
+func (w *watcher) queueScan(path string) {
+	w.scanMu.Lock()
+	defer w.scanMu.Unlock()
+	if w.isShuttingDown.Load() {
+		return
+	}
+	if w.scanPending == nil {
+		w.scanPending = make(map[string]struct{})
+	}
+	for pending := range w.scanPending {
+		if pending == path || isSubpath(pending, path) {
+			return
+		}
+		if isSubpath(path, pending) {
+			delete(w.scanPending, pending)
+		}
+	}
+	w.scanPending[path] = struct{}{}
+	if w.scanWorker {
+		return
+	}
+	w.scanWorker = true
+	w.scanWorkers.Add(1)
+	go func() {
+		defer w.scanWorkers.Done()
+		for {
+			w.scanMu.Lock()
+			var next string
+			for pending := range w.scanPending {
+				next = pending
+				delete(w.scanPending, pending)
+				break
+			}
+			if next == "" {
+				w.scanWorker = false
+				w.scanMu.Unlock()
+				return
+			}
+			w.scanMu.Unlock()
+			w.scanDirectory(next)
+		}
+	}()
+}
+
 func (w *watcher) scanDirectory(path string) {
 	if w.isShuttingDown.Load() {
 		return

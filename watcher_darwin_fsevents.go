@@ -249,7 +249,8 @@ func (w *watcher) handleDarwinEvent(path string, flags uint32, id uint64, now ti
 	}
 	if flags&(FSEventStreamEventFlagMustScanSubDirs|FSEventStreamEventFlagUserDropped|FSEventStreamEventFlagKernelDropped) != 0 {
 		w.logWarn("FSEvents signaling potential data loss", "flags", fmt.Sprintf("%08x", flags), "path", path)
-		go w.scanDirectory(path)
+		w.handlePlatformEvent(WatchEvent{ID: id, Path: path, Types: []EventType{EventOverflow}, Flags: parseDarwinEventFlags(flags), Time: now})
+		w.queueScan(path)
 		return
 	}
 	types := parseGenericEventFlags(flags)

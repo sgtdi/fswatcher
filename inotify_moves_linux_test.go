@@ -98,3 +98,26 @@ func TestInotifyMoveSelfWithoutParentDropsSubtree(t *testing.T) {
 	require.False(t, w.handleWatchRemovalEvents(p, &unix.InotifyEvent{Wd: 1, Mask: unix.IN_MOVE_SELF}, "/watch"))
 	require.Empty(t, p.wds)
 }
+
+func TestInotifyOverflowRebuildsDirectoryCoverage(t *testing.T) {
+	root := t.TempDir()
+	old := filepath.Join(root, "old")
+	require.NoError(t, os.Mkdir(old, 0700))
+	wi, err := New(WithPath(root), WithSeverity(SeverityNone))
+	require.NoError(t, err)
+	w := wi.(*watcher)
+	p, err := newInotify()
+	require.NoError(t, err)
+	defer unix.Close(p.fd)
+	defer w.aggregator.close()
+	require.NoError(t, p.addWatch(w, &WatchPath{Path: root, Depth: WatchNested}))
+	oldWD := p.trie.findNode(old).wd
+	require.NoError(t, os.Rename(old, filepath.Join(t.TempDir(), "outside")))
+	fresh := filepath.Join(root, "old", "fresh")
+	require.NoError(t, os.MkdirAll(fresh, 0700))
+	w.handleInotifyEvent(p, &unix.InotifyEvent{Mask: unix.IN_Q_OVERFLOW}, time.Now(), nil, 0)
+	require.NotContains(t, p.wds, oldWD)
+	require.NotNil(t, p.trie.findNode(fresh))
+	w.aggregator.close()
+	require.Contains(t, (<-w.Events()).Types, EventOverflow)
+}

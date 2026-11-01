@@ -206,8 +206,6 @@ func (w *watcher) runInotifyLoop(ctx context.Context, p *inotify, done chan stru
 		}
 
 		p.expireMoves(time.Now())
-		// Success, reset backoff
-		w.resetBackoff(backoff)
 
 		for i := range nEvents {
 			if epollEvents[i].Fd == int32(eventFD) {
@@ -219,11 +217,18 @@ func (w *watcher) runInotifyLoop(ctx context.Context, p *inotify, done chan stru
 				// Inotify event is ready to be proecessed
 				n, readErr := unix.Read(p.fd, buf)
 				if n <= 0 {
-					if readErr != nil && readErr != unix.EAGAIN {
-						w.logError("inotify read error", "error", readErr)
+					if readErr == unix.EAGAIN || readErr == unix.EINTR {
+						continue
+					}
+					if readErr == nil {
+						readErr = errors.New("inotify read returned no data")
+					}
+					if !w.handleLoopError("inotify read", readErr, backoff) {
+						return
 					}
 					continue
 				}
+				w.resetBackoff(backoff)
 				w.processInotifyEvents(p, buf[:n])
 			}
 		}
@@ -268,10 +273,8 @@ func (w *watcher) handleWatchRemovalEvents(p *inotify, e *unix.InotifyEvent, pat
 func (w *watcher) handleInotifyEvent(p *inotify, e *unix.InotifyEvent, now time.Time, buf []byte, offset int) {
 	if e.Mask&unix.IN_Q_OVERFLOW != 0 {
 		w.logError("inotify event queue overflowed")
-		w.handlePlatformEvent(WatchEvent{
-			Types: []EventType{EventOverflow},
-			Time:  now,
-		})
+		w.handlePlatformEvent(WatchEvent{Types: []EventType{EventOverflow}, Time: now})
+		p.reconcileAfterOverflow(w)
 		return
 	}
 
@@ -583,5 +586,35 @@ func (p *inotify) expireMoves(now time.Time) {
 	}
 	if changed {
 		p.rebuildTrieLocked()
+	}
+}
+
+// A queue overflow can hide creates, deletes and renames. Re-register from
+// configured roots instead of trusting descriptor-to-path mappings afterwards.
+func (p *inotify) reconcileAfterOverflow(w *watcher) {
+	w.opsMu.Lock()
+	defer w.opsMu.Unlock()
+	if w.isShuttingDown.Load() {
+		return
+	}
+	p.mu.Lock()
+	for wd := range p.wds {
+		_, _ = unix.InotifyRmWatch(p.fd, uint32(wd))
+	}
+	p.wds = make(map[int]*WatchPath)
+	p.trie = newPathTrieNode()
+	p.moves = make(map[uint32]inotifyMove)
+	p.mu.Unlock()
+	w.pathMu.RLock()
+	roots := make([]*WatchPath, 0, len(w.watchedPaths))
+	for _, root := range w.watchedPaths {
+		roots = append(roots, root)
+	}
+	w.pathMu.RUnlock()
+	for _, root := range roots {
+		if err := p.addWatch(w, root); err != nil {
+			atomic.AddInt64(&w.stats.eventsPartial, 1)
+			w.logError("Failed to restore watch after overflow", "path", root.Path, "error", err)
+		}
 	}
 }

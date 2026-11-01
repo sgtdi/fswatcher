@@ -109,7 +109,6 @@ func (w *watcher) runWindowsLoop(iocp windows.Handle, done chan struct{}) {
 		close(done)
 	}()
 
-	backoff := newBackoffState()
 	for {
 		var bytesRead uint32
 		var key uintptr
@@ -122,51 +121,44 @@ func (w *watcher) runWindowsLoop(iocp windows.Handle, done chan struct{}) {
 			return
 		}
 
-		if err != nil {
-			// ERROR_OPERATION_ABORTED is expected if a handle is closed while a read is pending
-			if err == windows.ERROR_OPERATION_ABORTED {
-				continue
-			}
-
-			if !w.handleLoopError("windows", err, backoff) {
-				return
-			}
+		if err == windows.ERROR_OPERATION_ABORTED {
 			continue
 		}
-
-		// Success, reset backoff
-		w.resetBackoff(backoff)
-
 		w.streamMu.Lock()
 		pathMap := w.streams["pathMap"].(map[uintptr]*watchedPath)
-		wp, ok := pathMap[key]
-		w.streamMu.Unlock()
-
-		if !ok {
-			w.logWarn("Received completion for unknown key", "key", key)
+		wp, exists := pathMap[key]
+		if !exists {
+			w.streamMu.Unlock()
 			continue
 		}
-
-		if bytesRead > 0 {
-			w.handleWindowsEvents(wp, bytesRead)
-		} else {
-			// bytesRead == 0 with no error indicates a buffer overflow
-			w.logWarn("Windows buffer overflow detected", "path", wp.path)
-			w.handlePlatformEvent(WatchEvent{
-				Path:  wp.path,
-				Types: []EventType{EventOverflow},
-				Time:  time.Now(),
-			})
+		completionErr := w.handleWindowsCompletion(wp, bytesRead, err, w.readChanges)
+		w.streamMu.Unlock()
+		if completionErr != nil {
+			w.logError("Windows watch failed", "path", wp.path, "error", completionErr)
+			return
 		}
 
-		// Reissue the read request to continue watching.
-		if err := w.readChanges(wp); err != nil {
-			// Happen if the directory is deleted
-			if err != windows.ERROR_INVALID_HANDLE {
-				w.logError("Failed to reissue read", "path", wp.path, "error", err)
-			}
-		}
 	}
+}
+
+// handleWindowsCompletion always rearms a recoverable overflow. Other failures
+// stop the backend, so Watch cannot remain active with a permanently silent root.
+func (w *watcher) handleWindowsCompletion(wp *watchedPath, n uint32, completionErr error, rearm func(*watchedPath) error) error {
+	if completionErr == windows.ERROR_OPERATION_ABORTED {
+		return nil
+	}
+	if completionErr != nil && completionErr != windows.ERROR_NOTIFY_ENUM_DIR && completionErr != windows.ERROR_MORE_DATA {
+		return newError("readCompletion", wp.path, completionErr)
+	}
+	if completionErr != nil || n == 0 {
+		w.handlePlatformEvent(WatchEvent{Path: wp.path, Types: []EventType{EventOverflow}, Time: time.Now()})
+	} else {
+		w.handleWindowsEvents(wp, n)
+	}
+	if err := rearm(wp); err != nil {
+		return newError("rearm", wp.path, err)
+	}
+	return nil
 }
 
 // handleWindowsEvents parses the buffer from ReadDirectoryChangesW
@@ -235,7 +227,11 @@ func (w *watcher) addWatch(watchPath *WatchPath) error {
 	}
 
 	// Allocate a uint64 slice to ensure 8-byte alignment, then slice it as bytes
-	alignedBuf := make([]uint64, (w.readBufferSize+7)/8)
+	readSize := w.readBufferSize
+	if volume := filepath.VolumeName(path); len(volume) >= 2 && volume[:2] == `\\` && readSize > 64*1024 {
+		readSize = 64 * 1024
+	}
+	alignedBuf := make([]uint64, (readSize+7)/8)
 	wp := &watchedPath{
 		handle:    handle,
 		path:      path,
