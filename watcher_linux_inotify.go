@@ -92,12 +92,21 @@ func (n *pathTrieNode) findAllChildren() []int {
 }
 
 // inotify is the inotify platform implementation
+type inotifyMove struct {
+	path        string
+	descriptors map[int]struct{}
+	deadline    time.Time
+}
+
+const inotifyMoveGrace = 100 * time.Millisecond
+
 type inotify struct {
-	w    *watcher
-	fd   int                // inotify fd
-	wds  map[int]*WatchPath // wd -> WatchPath config mapping
-	trie *pathTrieNode      // Trie for efficient path prefix lookups
-	mu   sync.RWMutex       // guards wds and trie
+	moves map[uint32]inotifyMove
+	w     *watcher
+	fd    int                // inotify fd
+	wds   map[int]*WatchPath // wd -> WatchPath config mapping
+	trie  *pathTrieNode      // Trie for efficient path prefix lookups
+	mu    sync.RWMutex       // guards wds and trie
 }
 
 // newInotify creates and initializes a new inotify instance
@@ -107,9 +116,10 @@ func newInotify() (*inotify, error) {
 		return nil, err
 	}
 	return &inotify{
-		fd:   fd,
-		wds:  make(map[int]*WatchPath),
-		trie: newPathTrieNode(),
+		fd:    fd,
+		wds:   make(map[int]*WatchPath),
+		trie:  newPathTrieNode(),
+		moves: make(map[uint32]inotifyMove),
 	}, nil
 }
 
@@ -183,7 +193,7 @@ func (w *watcher) runInotifyLoop(ctx context.Context, p *inotify, done chan stru
 	backoff := newBackoffState()
 
 	for {
-		nEvents, err := unix.EpollWait(epfd, epollEvents, -1)
+		nEvents, err := unix.EpollWait(epfd, epollEvents, p.moveTimeout(time.Now()))
 		if err != nil {
 			if err == unix.EINTR {
 				continue
@@ -195,6 +205,7 @@ func (w *watcher) runInotifyLoop(ctx context.Context, p *inotify, done chan stru
 			continue
 		}
 
+		p.expireMoves(time.Now())
 		// Success, reset backoff
 		w.resetBackoff(backoff)
 
@@ -233,12 +244,20 @@ func (w *watcher) handleWatchRemovalEvents(p *inotify, e *unix.InotifyEvent, pat
 		return true
 	}
 
-	if (e.Mask & (unix.IN_DELETE_SELF | unix.IN_MOVE_SELF)) != 0 {
+	if e.Mask&unix.IN_DELETE_SELF != 0 {
 		p.mu.Lock()
-		delete(p.wds, int(e.Wd))
-		if node := p.trie.findNode(path); node != nil {
-			node.wd = -1
+		p.removeSubtreeLocked(path)
+		p.mu.Unlock()
+	}
+	if e.Mask&unix.IN_MOVE_SELF != 0 {
+		p.mu.Lock()
+		// A watched parent supplies FROM/TO cookies and owns path updates.
+		parent := p.trie.findNode(filepath.Dir(path))
+		if parent != nil && parent.wd != -1 {
+			p.mu.Unlock()
+			return true
 		}
+		p.removeSubtreeLocked(path)
 		p.mu.Unlock()
 	}
 
@@ -277,8 +296,21 @@ func (w *watcher) handleInotifyEvent(p *inotify, e *unix.InotifyEvent, now time.
 		path = filepath.Join(parentWatch.Path, name)
 	}
 
+	if e.Mask&unix.IN_ISDIR != 0 && e.Cookie != 0 {
+		if e.Mask&unix.IN_MOVED_FROM != 0 {
+			p.beginMove(e.Cookie, path, now)
+		}
+		if e.Mask&unix.IN_MOVED_TO != 0 {
+			p.completeMove(w, e.Cookie, path)
+		}
+	}
+
 	// Handle events that remove or invalidate the watch first.
 	if w.handleWatchRemovalEvents(p, e, path) {
+		return
+	}
+
+	if p.descriptorInMove(int(e.Wd)) {
 		return
 	}
 
@@ -314,6 +346,9 @@ func (w *watcher) processInotifyEvents(p *inotify, buf []byte) {
 			break
 		}
 		e := (*unix.InotifyEvent)(unsafe.Pointer(&buf[offset]))
+		if uint64(e.Len) > uint64(len(buf)-offset-unix.SizeofInotifyEvent) {
+			break
+		}
 		w.handleInotifyEvent(p, e, now, buf, offset)
 
 		eventSize := unix.SizeofInotifyEvent + int(e.Len)
@@ -450,5 +485,103 @@ func (p *inotify) rebuildTrieLocked() {
 		if wp != nil {
 			p.trie.insert(wp.Path, wd)
 		}
+	}
+}
+
+func (p *inotify) removeSubtreeLocked(path string) {
+	for wd, wp := range p.wds {
+		if wp.Path == path || isSubpath(path, wp.Path) {
+			_, _ = unix.InotifyRmWatch(p.fd, uint32(wd))
+			delete(p.wds, wd)
+		}
+	}
+	p.rebuildTrieLocked()
+}
+
+func (p *inotify) beginMove(cookie uint32, path string, now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	move := inotifyMove{path: path, descriptors: make(map[int]struct{}), deadline: now.Add(inotifyMoveGrace)}
+	for wd, wp := range p.wds {
+		if wp.Path == path || isSubpath(path, wp.Path) {
+			move.descriptors[wd] = struct{}{}
+		}
+	}
+	if p.moves == nil {
+		p.moves = make(map[uint32]inotifyMove)
+	}
+	p.moves[cookie] = move
+}
+
+func (p *inotify) completeMove(w *watcher, cookie uint32, destination string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	move, exists := p.moves[cookie]
+	if !exists {
+		return
+	}
+	delete(p.moves, cookie)
+	for wd := range move.descriptors {
+		wp, exists := p.wds[wd]
+		if !exists || (wp.Path != move.path && !isSubpath(move.path, wp.Path)) {
+			continue
+		}
+		path := destination + strings.TrimPrefix(wp.Path, move.path)
+		if !w.nativeWatchNeeded(path, "", false) || w.isIgnored(path) {
+			_, _ = unix.InotifyRmWatch(p.fd, uint32(wd))
+			delete(p.wds, wd)
+			continue
+		}
+		updated := *wp
+		updated.Path = path
+		p.wds[wd] = &updated
+	}
+	p.rebuildTrieLocked()
+}
+
+func (p *inotify) descriptorInMove(wd int) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, move := range p.moves {
+		if _, exists := move.descriptors[wd]; exists {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *inotify) moveTimeout(now time.Time) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	timeout := -1
+	for _, move := range p.moves {
+		remaining := max(0, int(move.deadline.Sub(now).Milliseconds())+1)
+		if timeout == -1 || remaining < timeout {
+			timeout = remaining
+		}
+	}
+	return timeout
+}
+
+func (p *inotify) expireMoves(now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	changed := false
+	for cookie, move := range p.moves {
+		if now.Before(move.deadline) {
+			continue
+		}
+		for wd := range move.descriptors {
+			wp, exists := p.wds[wd]
+			if exists && (wp.Path == move.path || isSubpath(move.path, wp.Path)) {
+				_, _ = unix.InotifyRmWatch(p.fd, uint32(wd))
+				delete(p.wds, wd)
+				changed = true
+			}
+		}
+		delete(p.moves, cookie)
+	}
+	if changed {
+		p.rebuildTrieLocked()
 	}
 }
