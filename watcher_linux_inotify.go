@@ -359,7 +359,7 @@ func (p *inotify) addWatch(w *watcher, watchPath *WatchPath) error {
 		watchRoot = parentWatch.Path
 		isWatchRoot = filepath.Clean(parentWatch.Path) == filepath.Clean(path)
 	}
-	hiddenPath := !w.includeHidden && isHiddenPathWithin(path, watchRoot)
+	hiddenPath := !w.includeHidden && w.isHiddenPathWithin(path, watchRoot)
 	if hiddenPath && !isWatchRoot {
 		return nil
 	}
@@ -393,7 +393,7 @@ func (p *inotify) addWatch(w *watcher, watchPath *WatchPath) error {
 		if err != nil {
 			return nil
 		}
-		if !w.includeHidden && isHiddenPathWithin(subp, subp) {
+		if !w.includeHidden && w.isHiddenPathWithin(subp, subp) {
 			if d.IsDir() {
 				return fs.SkipDir
 			}

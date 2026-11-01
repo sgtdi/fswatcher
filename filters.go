@@ -3,10 +3,94 @@ package fswatcher
 import (
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 )
+
+const hiddenAttributeCacheMaxSize = 8192
+
+type hiddenAttributeCacheEntry struct {
+	hidden         bool
+	generation     uint64
+	pathGeneration uint64
+}
+
+// hiddenAttributeCache avoids repeated filesystem attribute lookups for the
+// same path components while keeping invalidation safe under concurrent scans.
+type hiddenAttributeCache struct {
+	mu              sync.RWMutex
+	values          map[string]hiddenAttributeCacheEntry
+	pathGenerations map[string]uint64
+	generation      uint64
+}
+
+func (c *hiddenAttributeCache) isHidden(path string, lookup func(string) bool) bool {
+	path = filepath.Clean(path)
+	for {
+		c.mu.RLock()
+		generation := c.generation
+		pathGeneration := c.pathGenerations[path]
+		entry, cached := c.values[path]
+		if cached && entry.generation == generation && entry.pathGeneration == pathGeneration {
+			c.mu.RUnlock()
+			return entry.hidden
+		}
+		c.mu.RUnlock()
+
+		hidden := lookup(path)
+
+		c.mu.Lock()
+		if generation != c.generation || pathGeneration != c.pathGenerations[path] {
+			c.mu.Unlock()
+			continue
+		}
+		if len(c.values) >= hiddenAttributeCacheMaxSize || len(c.pathGenerations) >= hiddenAttributeCacheMaxSize {
+			c.resetLocked()
+			generation = c.generation
+			pathGeneration = 0
+		}
+		if c.values == nil {
+			c.values = make(map[string]hiddenAttributeCacheEntry)
+		}
+		c.values[path] = hiddenAttributeCacheEntry{
+			hidden:         hidden,
+			generation:     generation,
+			pathGeneration: pathGeneration,
+		}
+		c.mu.Unlock()
+		return hidden
+	}
+}
+
+func (c *hiddenAttributeCache) invalidatePath(path string) {
+	path = filepath.Clean(path)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.pathGenerations) >= hiddenAttributeCacheMaxSize {
+		c.resetLocked()
+		return
+	}
+	if c.pathGenerations == nil {
+		c.pathGenerations = make(map[string]uint64)
+	}
+	c.pathGenerations[path]++
+	delete(c.values, path)
+}
+
+func (c *hiddenAttributeCache) invalidateAll() {
+	c.mu.Lock()
+	c.generation++
+	c.pathGenerations = make(map[string]uint64)
+	c.mu.Unlock()
+}
+
+func (c *hiddenAttributeCache) resetLocked() {
+	c.generation++
+	c.values = make(map[string]hiddenAttributeCacheEntry)
+	c.pathGenerations = make(map[string]uint64)
+}
 
 // PathFilter defines the interface for path filtering logic
 type PathFilter interface {
@@ -109,7 +193,7 @@ func (w *watcher) isIgnoredForWatch(path string, watch *WatchPath) bool {
 		if watch != nil {
 			root = watch.Path
 		}
-		if isHiddenPathWithin(path, root) {
+		if w.isHiddenPathWithin(path, root) {
 			return true
 		}
 	}
@@ -137,6 +221,21 @@ func (w *watcher) isIgnoredPattern(path string) bool {
 // as far as the watched root when the path belongs to one.
 func isHiddenPathWithin(path, root string) bool {
 	return isPlatformHidden(path, root)
+}
+
+func (w *watcher) isHiddenPathWithin(path, root string) bool {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "freebsd" && runtime.GOOS != "windows" {
+		return hasHiddenPathComponentWithin(path, root)
+	}
+	return walkPathAncestors(path, root, func(current string) bool {
+		return isDotHiddenComponent(current) || w.hiddenAttributeCache.isHidden(current, isPlatformHiddenComponent)
+	})
+}
+
+func isPlatformHidden(path, root string) bool {
+	return walkPathAncestors(path, root, func(current string) bool {
+		return isDotHiddenComponent(current) || isPlatformHiddenComponent(current)
+	})
 }
 
 func hasHiddenPathComponentWithin(path, root string) bool {

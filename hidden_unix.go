@@ -3,7 +3,5 @@
 package fswatcher
 
 // Linux, OpenBSD, NetBSD, and DragonFly use dot-prefixed names as their
-// hidden-file convention.
-func isPlatformHidden(path, root string) bool {
-	return hasHiddenPathComponentWithin(path, root)
-}
+// hidden-file convention and have no separate hidden attribute.
+func isPlatformHiddenComponent(string) bool { return false }

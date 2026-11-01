@@ -14,6 +14,17 @@ import (
 
 func TestDarwinHiddenFlagFiltering(t *testing.T) {
 	root := t.TempDir()
+	changed := filepath.Join(root, "changed.txt")
+	require.NoError(t, os.WriteFile(changed, []byte("test"), 0o600))
+	wChanged := watcherForHiddenPathTest(root)
+	assert.False(t, wChanged.isIgnored(changed), "visible file should initially be cached as not hidden")
+	if err := unix.Chflags(changed, unix.UF_HIDDEN); err != nil {
+		t.Skipf("filesystem does not support UF_HIDDEN: %v", err)
+	}
+	t.Cleanup(func() { _ = unix.Chflags(changed, 0) })
+	wChanged.handlePlatformEvent(WatchEvent{Path: changed, Types: []EventType{EventChmod}})
+	assert.True(t, wChanged.isIgnored(changed), "attribute event should invalidate a cached hidden flag")
+
 	file := filepath.Join(root, "hidden.txt")
 	require.NoError(t, os.WriteFile(file, []byte("test"), 0o600))
 	if err := unix.Chflags(file, unix.UF_HIDDEN); err != nil {

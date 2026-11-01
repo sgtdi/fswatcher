@@ -450,7 +450,7 @@ func collectFanotifyDirectories(w *watcher, root string, depth WatchDepth) ([]st
 		if filepath.Clean(path) == filepath.Clean(root) || !entry.IsDir() {
 			return nil
 		}
-		if !w.includeHidden && isHiddenPathWithin(path, root) {
+		if !w.includeHidden && w.isHiddenPathWithin(path, root) {
 			return fs.SkipDir
 		}
 		dirs = append(dirs, filepath.Clean(path))
@@ -539,7 +539,7 @@ func (p *fanotify) addWatch(w *watcher, watchPath *WatchPath) error {
 
 func (p *fanotify) addDirectoryTree(w *watcher, path string) error {
 	if !w.includeHidden {
-		if root := w.findMostSpecificWatchPath(path); root != nil && isHiddenPathWithin(path, root.Path) {
+		if root := w.findMostSpecificWatchPath(path); root != nil && w.isHiddenPathWithin(path, root.Path) {
 			return nil
 		}
 	}

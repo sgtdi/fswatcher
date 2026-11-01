@@ -135,6 +135,59 @@ func TestHiddenPathFiltering(t *testing.T) {
 	})
 }
 
+func TestHiddenAttributeCacheReusesAndInvalidatesLookups(t *testing.T) {
+	var cache hiddenAttributeCache
+	lookups := 0
+	hidden := false
+	lookup := func(string) bool {
+		lookups++
+		return hidden
+	}
+	path := filepath.Join(t.TempDir(), "visible.txt")
+
+	assert.False(t, cache.isHidden(path, lookup))
+	assert.False(t, cache.isHidden(path, lookup))
+	assert.Equal(t, 1, lookups, "cached attribute should avoid a second lookup")
+
+	hidden = true
+	cache.invalidatePath(path)
+	assert.True(t, cache.isHidden(path, lookup), "path invalidation should refresh the attribute")
+	assert.Equal(t, 2, lookups)
+
+	hidden = false
+	cache.invalidateAll()
+	assert.False(t, cache.isHidden(path, lookup), "global invalidation should refresh the attribute")
+	assert.Equal(t, 3, lookups)
+}
+
+func TestHandlePlatformEventInvalidatesHiddenAttributeCache(t *testing.T) {
+	root := filepath.Clean(t.TempDir())
+	path := filepath.Join(root, "visible.dat")
+	w := watcherForHiddenPathTest(root)
+	w.events = make(chan WatchEvent, 2)
+	w.dropped = make(chan WatchEvent, 2)
+	w.filter = newPatternFilter(nil, nil)
+	w.aggregator = newEventAggregator(w, time.Hour)
+	t.Cleanup(func() { w.aggregator.close() })
+	w.hiddenAttributeCache.isHidden(path, func(string) bool { return false })
+
+	eventType := EventChmod
+	if runtime.GOOS == "windows" {
+		eventType = EventMod
+	}
+	w.handlePlatformEvent(WatchEvent{Path: path, Types: []EventType{eventType}})
+
+	w.hiddenAttributeCache.mu.RLock()
+	pathGeneration := w.hiddenAttributeCache.pathGenerations[path]
+	w.hiddenAttributeCache.mu.RUnlock()
+	assert.Equal(t, uint64(1), pathGeneration, "attribute events should invalidate the path cache")
+	w.handlePlatformEvent(WatchEvent{Path: path, Types: []EventType{EventRename}})
+	w.hiddenAttributeCache.mu.RLock()
+	generation := w.hiddenAttributeCache.generation
+	w.hiddenAttributeCache.mu.RUnlock()
+	assert.Equal(t, uint64(1), generation, "structural events should invalidate the entire cache")
+}
+
 func TestGitDirectoryUsesHiddenFilter(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("a .git name alone is not hidden on Windows")
@@ -216,6 +269,30 @@ func watcherForHiddenPathTest(root string) *watcher {
 		watchedPaths: map[string]*WatchPath{
 			root: {Path: root},
 		},
+	}
+}
+
+func BenchmarkIsIgnoredForWatchDeepPath(b *testing.B) {
+	root := b.TempDir()
+	path := root
+	for i := 0; i < 8; i++ {
+		path = filepath.Join(path, "level")
+	}
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		b.Fatal(err)
+	}
+	path = filepath.Join(path, "payload.dat")
+	w, err := New(WithPath(root))
+	if err != nil {
+		b.Fatal(err)
+	}
+	watcherImpl := w.(*watcher)
+	watchPath := &WatchPath{Path: root, Depth: WatchNested}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		watcherImpl.isIgnoredForWatch(path, watchPath)
 	}
 }
 

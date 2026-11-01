@@ -14,6 +14,14 @@ import (
 
 func TestWindowsHiddenAttributeFiltering(t *testing.T) {
 	root := t.TempDir()
+	changed := filepath.Join(root, "changed.txt")
+	require.NoError(t, os.WriteFile(changed, []byte("test"), 0o600))
+	wChanged := watcherForHiddenPathTest(root)
+	assert.False(t, wChanged.isIgnored(changed), "visible file should initially be cached as not hidden")
+	setWindowsHidden(t, changed)
+	wChanged.handlePlatformEvent(WatchEvent{Path: changed, Types: []EventType{EventMod}})
+	assert.True(t, wChanged.isIgnored(changed), "modified event should invalidate a cached hidden flag")
+
 	file := filepath.Join(root, "hidden.txt")
 	require.NoError(t, os.WriteFile(file, []byte("test"), 0o600))
 	setWindowsHidden(t, file)

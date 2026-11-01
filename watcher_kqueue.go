@@ -127,6 +127,9 @@ func (w *watcher) processKqueueEvents(k *kqueue, events []unix.Kevent_t) {
 		}
 
 		flags := event.Fflags
+		if flags&(unix.NOTE_DELETE|unix.NOTE_RENAME) != 0 {
+			w.hiddenAttributeCache.invalidateAll()
+		}
 		// Map kqueue events flags
 		var types []EventType
 		if flags&unix.NOTE_DELETE == unix.NOTE_DELETE {
@@ -178,12 +181,13 @@ func (w *watcher) shouldScanKqueueDirectory(path string) bool {
 
 // scanDirectoryLocked checks for new files in a watched dir
 func (w *watcher) scanDirectoryLocked(k *kqueue, dirPath string) {
+	w.hiddenAttributeCache.invalidateAll()
 	if !k.w.includeHidden {
 		watchRoot := dirPath
 		if parentWatch := k.w.findMostSpecificWatchPath(dirPath); parentWatch != nil {
 			watchRoot = parentWatch.Path
 		}
-		if isHiddenPathWithin(dirPath, watchRoot) {
+		if w.isHiddenPathWithin(dirPath, watchRoot) {
 			return
 		}
 	}
@@ -200,7 +204,7 @@ func (w *watcher) scanDirectoryLocked(k *kqueue, dirPath string) {
 
 	for _, entry := range entries {
 		fullPath := filepath.Join(dirPath, entry.Name())
-		if !k.w.includeHidden && isHiddenPathWithin(fullPath, fullPath) {
+		if !k.w.includeHidden && k.w.isHiddenPathWithin(fullPath, fullPath) {
 			continue
 		}
 		if _, exists := k.paths[fullPath]; !exists {
@@ -261,7 +265,7 @@ func (k *kqueue) addWatchContentsLocked(root string) error {
 		if path == root {
 			return nil
 		}
-		if !k.w.includeHidden && isHiddenPathWithin(path, path) {
+		if !k.w.includeHidden && k.w.isHiddenPathWithin(path, path) {
 			if entry.IsDir() {
 				return fs.SkipDir
 			}
@@ -377,7 +381,7 @@ func (k *kqueue) addWatch(watchPath *WatchPath) error {
 		if err != nil {
 			return nil // Skip errors
 		}
-		if !k.w.includeHidden && isHiddenPathWithin(path, path) {
+		if !k.w.includeHidden && k.w.isHiddenPathWithin(path, path) {
 			if d.IsDir() {
 				return fs.SkipDir
 			}

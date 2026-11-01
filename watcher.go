@@ -64,16 +64,17 @@ type watcher struct {
 	isUsed         atomic.Bool
 
 	// Configuration fields
-	init               error
-	cooldown           time.Duration
-	bufferSize         int
-	readBufferSize     int
-	severity           Severity
-	ownsEventsChannel  bool
-	ownsDroppedChannel bool
-	incRegexPatterns   []string
-	excRegexPatterns   []string
-	includeHidden      bool
+	init                 error
+	cooldown             time.Duration
+	bufferSize           int
+	readBufferSize       int
+	severity             Severity
+	ownsEventsChannel    bool
+	ownsDroppedChannel   bool
+	incRegexPatterns     []string
+	excRegexPatterns     []string
+	includeHidden        bool
+	hiddenAttributeCache hiddenAttributeCache
 
 	// Ignored file patterns, set by WithIgnoreList; nil uses the defaults
 	ignoreList []string
@@ -395,6 +396,7 @@ func (w *watcher) AddPath(path string, options ...PathOption) error {
 	w.watchedPaths[wp.Path] = wp
 	w.pathMu.Unlock()
 
+	w.hiddenAttributeCache.invalidateAll()
 	if err := w.addWatch(wp); err != nil {
 		w.pathMu.Lock()
 		delete(w.watchedPaths, wp.Path)
@@ -430,6 +432,7 @@ func (w *watcher) DropPath(path string) error {
 		w.logError("Platform backend failed to remove watch", "path", wp.Path, "error", err)
 		return err
 	}
+	w.hiddenAttributeCache.invalidateAll()
 
 	w.pathMu.Lock()
 	delete(w.watchedPaths, wp.Path)
@@ -613,7 +616,7 @@ func (w *watcher) scanDirectory(path string) {
 		if parentWatch := w.findMostSpecificWatchPath(path); parentWatch != nil {
 			watchRoot = parentWatch.Path
 		}
-		if isHiddenPathWithin(path, watchRoot) {
+		if w.isHiddenPathWithin(path, watchRoot) {
 			return
 		}
 	}
@@ -634,7 +637,7 @@ func (w *watcher) scanDirectory(path string) {
 		if err != nil {
 			return nil // Skip files with errors
 		}
-		if !w.includeHidden && isHiddenPathWithin(filePath, filePath) {
+		if !w.includeHidden && w.isHiddenPathWithin(filePath, filePath) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -744,8 +747,18 @@ func (w *watcher) handlePlatformEvent(event WatchEvent) {
 
 	// Overflow events have no path and must bypass all path-based filtering
 	if slices.Contains(event.Types, EventOverflow) {
+		w.hiddenAttributeCache.invalidateAll()
 		w.aggregator.addEvent(event)
 		return
+	}
+
+	if slices.Contains(event.Types, EventCreate) || slices.Contains(event.Types, EventRemove) || slices.Contains(event.Types, EventRename) {
+		// A structural change can replace a cached directory tree at this path.
+		w.hiddenAttributeCache.invalidateAll()
+	} else if slices.Contains(event.Types, EventChmod) || (runtime.GOOS == "windows" && slices.Contains(event.Types, EventMod)) {
+		// Windows reports attribute changes as FILE_ACTION_MODIFIED, which maps
+		// to EventMod alongside ordinary file writes.
+		w.hiddenAttributeCache.invalidatePath(event.Path)
 	}
 
 	// Platform-agnostic depth filtering
