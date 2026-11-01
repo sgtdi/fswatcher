@@ -16,12 +16,14 @@ import (
 
 // kqueue is the kernel queue-based implementation for macOS (without CGO) and BSD
 type kqueue struct {
-	w     *watcher
-	kqFd  int             // file descriptor
-	wds   map[int]string  // watch descriptors to paths
-	paths map[string]int  // paths to watch descriptors
-	dirs  map[string]bool // directories list
-	mu    sync.Mutex
+	w         *watcher
+	kqFd      int // file descriptor
+	wakeRead  int
+	wakeWrite int
+	wds       map[int]string  // watch descriptors to paths
+	paths     map[string]int  // paths to watch descriptors
+	dirs      map[string]bool // directories list
+	mu        sync.Mutex
 }
 
 // newKqueue creates a new instance of kqueue
@@ -30,12 +32,30 @@ func newKqueue(w *watcher) (*kqueue, error) {
 	if err != nil {
 		return nil, err
 	}
+	pipe := make([]int, 2)
+	if err := unix.Pipe(pipe); err != nil {
+		_ = unix.Close(kqFd)
+		return nil, err
+	}
+	for _, fd := range pipe {
+		unix.CloseOnExec(fd)
+		_ = unix.SetNonblock(fd, true)
+	}
+	change := []unix.Kevent_t{{Ident: kqueueIdent(pipe[0]), Filter: unix.EVFILT_READ, Flags: unix.EV_ADD | unix.EV_CLEAR}}
+	if _, err := unix.Kevent(kqFd, change, nil, nil); err != nil {
+		_ = unix.Close(pipe[0])
+		_ = unix.Close(pipe[1])
+		_ = unix.Close(kqFd)
+		return nil, err
+	}
 	return &kqueue{
-		w:     w,
-		kqFd:  kqFd,
-		wds:   make(map[int]string),
-		paths: make(map[string]int),
-		dirs:  make(map[string]bool),
+		w:         w,
+		kqFd:      kqFd,
+		wakeRead:  pipe[0],
+		wakeWrite: pipe[1],
+		wds:       make(map[int]string),
+		paths:     make(map[string]int),
+		dirs:      make(map[string]bool),
 	}, nil
 }
 
@@ -57,8 +77,19 @@ func (w *watcher) startPlatform(ctx context.Context) (<-chan struct{}, error) {
 
 // runKqueueLoop starts the event loop
 func (w *watcher) runKqueueLoop(ctx context.Context, k *kqueue, done chan struct{}) {
+	stopWake, wakeExited := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(wakeExited)
+		select {
+		case <-ctx.Done():
+			_, _ = unix.Write(k.wakeWrite, []byte{1})
+		case <-stopWake:
+		}
+	}()
 	// Closes all open descriptors and kqueue instance
 	defer func() {
+		close(stopWake)
+		<-wakeExited
 		w.lockPlatformShutdown()
 		defer w.opsMu.Unlock()
 		w.logDebug("kqueue platform shutting down")
@@ -67,6 +98,8 @@ func (w *watcher) runKqueueLoop(ctx context.Context, k *kqueue, done chan struct
 			unix.Close(fd)
 		}
 		unix.Close(k.kqFd)
+		unix.Close(k.wakeRead)
+		unix.Close(k.wakeWrite)
 		k.wds = nil
 		k.paths = nil
 		k.dirs = nil
@@ -76,8 +109,6 @@ func (w *watcher) runKqueueLoop(ctx context.Context, k *kqueue, done chan struct
 
 	// Init event buffer and timeout
 	events := make([]unix.Kevent_t, w.bufferSize)
-	ts := unix.NsecToTimespec(w.cooldown.Nanoseconds())
-	timeout := &ts
 	backoff := newBackoffState()
 
 	for {
@@ -88,7 +119,7 @@ func (w *watcher) runKqueueLoop(ctx context.Context, k *kqueue, done chan struct
 		}
 
 		// Polling
-		n, err := unix.Kevent(k.kqFd, nil, events, timeout)
+		n, err := unix.Kevent(k.kqFd, nil, events, nil)
 		if err != nil {
 			// Interrupted signal
 			if err == unix.EINTR {
@@ -99,6 +130,9 @@ func (w *watcher) runKqueueLoop(ctx context.Context, k *kqueue, done chan struct
 				return
 			}
 			continue
+		}
+		if ctx.Err() != nil {
+			return
 		}
 
 		// Success, reset backoff

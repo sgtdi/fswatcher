@@ -58,6 +58,8 @@ func BenchmarkKqueueAddWatch(b *testing.B) {
 			_ = unix.Close(fd)
 		}
 		_ = unix.Close(k.kqFd)
+		_ = unix.Close(k.wakeRead)
+		_ = unix.Close(k.wakeWrite)
 		k.wds = nil
 		k.paths = nil
 		k.dirs = nil

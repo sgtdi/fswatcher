@@ -95,7 +95,7 @@ func TestNewKqueue(t *testing.T) {
 	assert.NotNil(t, k.dirs)
 
 	// Cleanup
-	unix.Close(k.kqFd)
+	closeKqueueForTest(k)
 }
 
 func TestStartPlatform(t *testing.T) {
@@ -171,7 +171,7 @@ func TestProcessKqueueEvents(t *testing.T) {
 
 	k, err := newKqueue(wImpl)
 	require.NoError(t, err)
-	defer unix.Close(k.kqFd)
+	defer closeKqueueForTest(k)
 
 	// Manually add watch to populate maps
 	k.mu.Lock()
@@ -225,7 +225,7 @@ func TestScanDirectoryLocked(t *testing.T) {
 
 	k, err := newKqueue(wImpl)
 	require.NoError(t, err)
-	defer unix.Close(k.kqFd)
+	defer closeKqueueForTest(k)
 
 	// Add the directory itself first (usually how it works)
 	k.mu.Lock()
@@ -277,7 +277,7 @@ func TestAddWatch(t *testing.T) {
 
 	k, err := newKqueue(wImpl)
 	require.NoError(t, err)
-	defer unix.Close(k.kqFd)
+	defer closeKqueueForTest(k)
 
 	wp := &WatchPath{Path: tmpDir}
 	err = k.addWatch(wp)
@@ -509,6 +509,8 @@ func closeKqueueForTest(k *kqueue) {
 		_ = unix.Close(fd)
 	}
 	_ = unix.Close(k.kqFd)
+	_ = unix.Close(k.wakeRead)
+	_ = unix.Close(k.wakeWrite)
 }
 
 func TestAddSingleWatchLocked(t *testing.T) {
@@ -523,7 +525,7 @@ func TestAddSingleWatchLocked(t *testing.T) {
 
 	k, err := newKqueue(wImpl)
 	require.NoError(t, err)
-	defer unix.Close(k.kqFd)
+	defer closeKqueueForTest(k)
 
 	k.mu.Lock()
 	err = k.addSingleWatchLocked(tmpFile.Name())
@@ -556,7 +558,7 @@ func TestRemoveWatch(t *testing.T) {
 
 	k, err := newKqueue(wImpl)
 	require.NoError(t, err)
-	defer unix.Close(k.kqFd)
+	defer closeKqueueForTest(k)
 
 	wp := &WatchPath{Path: tmpDir}
 	err = k.addWatch(wp)
@@ -572,4 +574,30 @@ func TestRemoveWatch(t *testing.T) {
 	// Should be empty as we removed the root
 	assert.Empty(t, k.paths)
 	assert.Empty(t, k.wds)
+}
+
+func TestKqueueCancellationDoesNotDependOnCooldown(t *testing.T) {
+	for _, cooldown := range []time.Duration{0, MaxCooldownDuration} {
+		t.Run(cooldown.String(), func(t *testing.T) {
+			ready := make(chan struct{})
+			w, err := New(WithPath(t.TempDir()), WithCooldown(cooldown), WithReadyChannel(ready), WithSeverity(SeverityNone))
+			require.NoError(t, err)
+			ctx, cancel := context.WithCancel(context.Background())
+			stopped := make(chan error, 1)
+			go func() { stopped <- w.Watch(ctx) }()
+			select {
+			case <-ready:
+			case <-time.After(5 * time.Second):
+				cancel()
+				t.Fatal("not ready")
+			}
+			cancel()
+			select {
+			case err := <-stopped:
+				require.NoError(t, err)
+			case <-time.After(time.Second):
+				t.Fatal("kqueue did not wake on cancellation")
+			}
+		})
+	}
 }
