@@ -52,6 +52,24 @@ func TestIsSystemFile(t *testing.T) {
 }
 
 func TestEventAggregator(t *testing.T) {
+	t.Run("CountsCoalescedEvents", func(t *testing.T) {
+		w := &watcher{events: make(chan WatchEvent, 1)}
+		ea := newEventAggregator(w, time.Hour)
+		ea.addEvent(WatchEvent{Path: "/test/coalesced.txt", Types: []EventType{EventCreate}})
+		ea.addEvent(WatchEvent{Path: "/test/coalesced.txt", Types: []EventType{EventMod}})
+		ea.addEvent(WatchEvent{Path: "/test/coalesced.txt", Types: []EventType{EventChmod}})
+
+		if got := w.Stats(); got.EventsCoalesced != 2 || got.EventsFiltered != 0 {
+			t.Fatalf("unexpected stats: coalesced=%d filtered=%d", got.EventsCoalesced, got.EventsFiltered)
+		}
+
+		ea.close()
+		event := <-w.events
+		if want := []EventType{EventCreate, EventMod, EventChmod}; !slices.Equal(event.Types, want) {
+			t.Fatalf("aggregated types = %v; want %v", event.Types, want)
+		}
+	})
+
 	t.Run("MergeEvents", func(t *testing.T) {
 		events := make(chan WatchEvent, 10)
 		w := &watcher{

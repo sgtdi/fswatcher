@@ -169,6 +169,7 @@ func (ea *EventAggregator) addEvent(event WatchEvent) {
 
 	existing, exists := ea.events[event.Path]
 	if exists {
+		atomic.AddInt64(&ea.watcher.stats.eventsCoalesced, 1)
 		// Update existing event
 		existing.lastSeen = now
 		existing.deadline = deadline

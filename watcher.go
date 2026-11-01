@@ -36,16 +36,18 @@ type WatcherStats struct {
 	StartTime       time.Time     // StartTime is when the watcher was created
 	Uptime          time.Duration // Uptime is the duration the watcher has been running
 	EventsProcessed int64         // EventsProcessed is the count of events sent to the Events channel
+	EventsCoalesced int64         // EventsCoalesced is the count of raw events merged into a pending event for the same path
 	EventsDropped   int64         // EventsDropped is the count of events sent to the Dropped channel
-	EventsFiltered  int64         // EventsFiltered is the count of events ignored by filters or debouncing
+	EventsFiltered  int64         // EventsFiltered is the count of events ignored by path, depth, type, or ignore-list filters
 	EventsLost      int64         // EventsLost is the count of events lost when all channels were full
-	EventsPartial   int64         // EventsPartial is the count of partial backend registrations
+	EventsPartial   int64         // EventsPartial is the count of inotify subdirectory watches skipped after reaching the system watch limit
 	ProcessingRate  float64       // ProcessingRate is the number of events processed per second
 }
 
 // watcherStats holds internal, mutable statistics
 type watcherStats struct {
 	eventsProcessed int64
+	eventsCoalesced int64
 	eventsDropped   int64
 	eventsFiltered  int64
 	eventsLost      int64
@@ -472,6 +474,7 @@ func (w *watcher) Stats() WatcherStats {
 	stats := WatcherStats{
 		StartTime:       w.stats.startTime,
 		EventsProcessed: atomic.LoadInt64(&w.stats.eventsProcessed),
+		EventsCoalesced: atomic.LoadInt64(&w.stats.eventsCoalesced),
 		EventsDropped:   atomic.LoadInt64(&w.stats.eventsDropped),
 		EventsFiltered:  atomic.LoadInt64(&w.stats.eventsFiltered),
 		EventsLost:      atomic.LoadInt64(&w.stats.eventsLost),

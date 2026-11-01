@@ -153,7 +153,7 @@ Once you have a `Watcher` instance from `New()`, you can use the following metho
 | `DropPath(path)` | Stops monitoring a directory at runtime. Safe to call concurrently with `AddPath()` |
 | `Close()` | Initiates a graceful shutdown — alternative to canceling the context |
 | `IsRunning()` | Returns `true` if `Watch()` is currently running |
-| `Stats()` | Returns a `WatcherStats` struct with runtime statistics (uptime, events processed, etc.) |
+| `Stats()` | Returns runtime statistics, including processed, coalesced, dropped, filtered, and lost events. `EventsPartial` currently counts inotify subdirectory watches skipped after reaching the system watch limit |
 | `Dropped()` | Returns a read-only channel for events dropped because the main `Events()` channel was full |
 
 ## Logging
