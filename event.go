@@ -230,6 +230,9 @@ func (ea *EventAggregator) run() {
 	var timer *time.Timer
 	var timerC <-chan time.Time
 	for {
+		if ea.isClosed.Load() {
+			return
+		}
 		next, ok := ea.nextDeadline()
 		if !ok {
 			if timer != nil {

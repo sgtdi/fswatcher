@@ -98,3 +98,19 @@ func TestStartupFailureClosesOwnedChannels(t *testing.T) {
 		t.Fatal("Dropped left open after startup failure")
 	}
 }
+
+func TestAggregatorCloseWithZeroCooldown(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		w := &watcher{events: make(chan WatchEvent, 1)}
+		ea := newEventAggregator(w, 0)
+		ea.addEvent(WatchEvent{Path: "file", Types: []EventType{EventMod}})
+		stopped := make(chan struct{})
+		go func() { ea.close(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(time.Second):
+			t.Fatal("close stalled on an overdue event")
+		}
+		require.Len(t, w.events, 1)
+	}
+}
