@@ -15,7 +15,7 @@ import (
 )
 
 func TestWatcher_Windows(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := canonicalTempDir(t)
 
 	w, err := New(WithPath(tempDir))
 	require.NoError(t, err)
