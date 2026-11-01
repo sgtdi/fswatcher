@@ -125,7 +125,7 @@ Customize the watcher's behavior using functional options passed to `fswatcher.N
 
 | Option                      | Description | Default |
 |:----------------------------| :--- | :--- |
-| `WithPath(path, ...)`       | Adds an initial directory to watch. Can be called multiple times. Accepts optional `PathOption` values like `WithDepth`, `WithEventMask`, `WithPathIncRegex`, etc | Current directory |
+| `WithPath(path, ...)`       | Adds an initial directory to watch, resolving symbolic links to its canonical absolute path. Can be called multiple times. Accepts optional `PathOption` values like `WithDepth`, `WithEventMask`, `WithPathIncRegex`, etc | Current directory |
 | `WithCooldown(d)`           | Sets the debouncing cooldown period. Events for the same path arriving within this duration will be merged | `100ms` |
 | `WithBufferSize(size)`      | Sets the size of the main event channel | `4096` |
 | `WithIncRegex(patterns...)` | Global include regex patterns — only matching paths are processed. If not set, all non-excluded paths are processed | (none) |
@@ -150,7 +150,7 @@ Once you have a `Watcher` instance from `New()`, you can use the following metho
 | `Watch(ctx)` | Starts the watcher. Blocking — runs until the context is canceled. Run in a goroutine. A watcher instance is single-use: after `Watch()` returns, create a new watcher with `New()` |
 | `Events()` | Returns a read-only channel (`<-chan WatchEvent`) for receiving file system events |
 | `AddPath(path)` | Adds a new directory to monitor at runtime. Safe to call concurrently with `DropPath()` |
-| `DropPath(path)` | Stops monitoring a directory at runtime. Safe to call concurrently with `AddPath()` |
+| `DropPath(path)` | Stops monitoring a directory at runtime. Accepts the original alias even after that alias is removed. Safe to call concurrently with `AddPath()` |
 | `Close()` | Initiates a graceful shutdown — alternative to canceling the context |
 | `IsRunning()` | Returns `true` if `Watch()` is currently running |
 | `Stats()` | Returns runtime statistics, including processed, coalesced, dropped, filtered, and lost events. `EventsPartial` currently counts inotify subdirectory watches skipped after reaching the system watch limit |

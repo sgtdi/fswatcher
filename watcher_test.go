@@ -578,8 +578,10 @@ func TestWatcher(t *testing.T) {
 
 		// Get absolute paths for assertion
 		absDir1, _ := filepath.Abs(".")
+		absDir1, _ = filepath.EvalSymlinks(absDir1)
 		absDir2, _ := filepath.Abs("../dir2")
-		absDir3, _ := filepath.Abs(dir3)
+		absDir2, _ = filepath.EvalSymlinks(absDir2)
+		absDir3, _ := filepath.EvalSymlinks(dir3)
 
 		// Test initial paths
 		w, err := New(WithPath("."), WithPath("../dir2"))

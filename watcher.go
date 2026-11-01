@@ -98,6 +98,7 @@ type watcher struct {
 	// Paths
 	paths        []*WatchPath
 	watchedPaths map[string]*WatchPath
+	watchAliases map[string]string
 	pathMu       sync.RWMutex
 	opsMu        sync.Mutex
 
@@ -149,6 +150,7 @@ func New(options ...WatcherOpt) (Watcher, error) {
 		ownsDroppedChannel: true,
 		severity:           SeverityWarn,
 		watchedPaths:       make(map[string]*WatchPath),
+		watchAliases:       make(map[string]string),
 	}
 
 	// Apply user-provided options
@@ -183,6 +185,7 @@ func New(options ...WatcherOpt) (Watcher, error) {
 	// Add initial paths to the watchedPaths map
 	for _, wp := range w.paths {
 		w.watchedPaths[wp.Path] = wp
+		w.watchAliases[wp.requestedPath] = wp.Path
 	}
 	w.paths = nil
 
@@ -298,6 +301,10 @@ func (w *watcher) Watch(ctx context.Context) (retErr error) {
 			w.opsMu.Unlock()
 			return nil
 		}
+		if _, err := validateWatchPath(path.Path, path.Depth); err != nil {
+			w.opsMu.Unlock()
+			return newError("startWatch", path.Path, err)
+		}
 		if err := w.addWatch(path); err != nil {
 			w.opsMu.Unlock()
 			return newError("startWatch", path.Path, err)
@@ -393,8 +400,12 @@ func (w *watcher) AddPath(path string, options ...PathOption) error {
 		w.pathMu.Lock()
 		delete(w.watchedPaths, wp.Path)
 		w.pathMu.Unlock()
+		_ = w.removeWatch(wp.Path)
 		return err
 	}
+	w.pathMu.Lock()
+	w.watchAliases[wp.requestedPath] = wp.Path
+	w.pathMu.Unlock()
 
 	w.logInfo("Successfully added new watch path", "path", wp.Path, "depth", wp.Depth)
 	return nil
@@ -417,6 +428,9 @@ func (w *watcher) DropPath(path string) error {
 	}
 
 	w.pathMu.Lock()
+	if canonical, exists := w.watchAliases[wp.Path]; exists {
+		wp.Path = canonical
+	}
 	if _, exists := w.watchedPaths[wp.Path]; !exists {
 		w.pathMu.Unlock()
 		return newError("DropPath", path, errors.New("path is not being watched"))
@@ -431,6 +445,11 @@ func (w *watcher) DropPath(path string) error {
 
 	w.pathMu.Lock()
 	delete(w.watchedPaths, wp.Path)
+	for alias, canonical := range w.watchAliases {
+		if canonical == wp.Path {
+			delete(w.watchAliases, alias)
+		}
+	}
 	w.pathMu.Unlock()
 
 	w.logInfo("Successfully removed watch path", "path", wp.Path)
@@ -782,7 +801,7 @@ func (w *watcher) handlePlatformEvent(event WatchEvent) {
 		// Get the directory of the event path
 		eventDir := filepath.Dir(event.Path)
 		// If the event's directory is not the same as the watched path, it's a subdirectory event so will be ignored
-		if filepath.Clean(eventDir) != filepath.Clean(parentWatch.Path) {
+		if event.Path != parentWatch.Path && filepath.Clean(eventDir) != filepath.Clean(parentWatch.Path) {
 			w.logDebug("Filtered by depth", "path", event.Path)
 			atomic.AddInt64(&w.stats.eventsFiltered, 1)
 			return

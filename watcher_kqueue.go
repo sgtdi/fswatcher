@@ -381,7 +381,10 @@ func (k *kqueue) addWatch(watchPath *WatchPath) error {
 
 	return filepath.WalkDir(watchPath.Path, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // Skip errors
+			if path == watchPath.Path {
+				return err
+			}
+			return nil
 		}
 		if !k.w.includeHidden && k.w.isHiddenPathWithin(path, path) {
 			if d.IsDir() {
