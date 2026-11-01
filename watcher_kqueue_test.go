@@ -344,6 +344,57 @@ func TestKqueueWatchesMovedInDirectoryTreeAndRemovesRenamedTree(t *testing.T) {
 	assert.NotContains(t, k.paths, filepath.Join(movedPath, "nested", "existing.txt"))
 }
 
+func TestKqueueTopLevelWatchesOnlyDirectChildren(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "child", "nested")
+	require.NoError(t, os.MkdirAll(nested, 0o700))
+	rootFile := filepath.Join(root, "root.txt")
+	nestedFile := filepath.Join(nested, "nested.txt")
+	require.NoError(t, os.WriteFile(rootFile, []byte("root"), 0o600))
+	require.NoError(t, os.WriteFile(nestedFile, []byte("nested"), 0o600))
+
+	w, err := New(WithPath(root, WithDepth(WatchTopLevel)), WithSeverity(SeverityNone))
+	require.NoError(t, err)
+	wImpl := w.(*watcher)
+	k, err := newKqueue(wImpl)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		wImpl.aggregator.close()
+		closeKqueueForTest(k)
+	})
+
+	wp, err := validateWatchPath(root, WatchTopLevel)
+	require.NoError(t, err)
+	require.NoError(t, k.addWatch(wp))
+
+	k.mu.Lock()
+	assert.Contains(t, k.paths, root)
+	assert.Contains(t, k.paths, filepath.Join(root, "child"))
+	assert.Contains(t, k.paths, rootFile)
+	assert.NotContains(t, k.paths, nested)
+	assert.NotContains(t, k.paths, nestedFile)
+	k.mu.Unlock()
+
+	newChild := filepath.Join(root, "new-child")
+	newNested := filepath.Join(newChild, "nested")
+	newNestedFile := filepath.Join(newNested, "file.txt")
+	require.NoError(t, os.MkdirAll(newNested, 0o700))
+	require.NoError(t, os.WriteFile(newNestedFile, []byte("nested"), 0o600))
+	k.mu.Lock()
+	wImpl.scanDirectoryLocked(k, root)
+	childFD, childWatched := k.paths[newChild]
+	_, nestedWatched := k.paths[newNested]
+	k.mu.Unlock()
+	assert.True(t, childWatched, "new direct child directory should be watched")
+	assert.False(t, nestedWatched, "new descendants should not be watched")
+
+	wImpl.processKqueueEvents(k, []unix.Kevent_t{{Ident: kqueueIdent(childFD), Fflags: unix.NOTE_WRITE}})
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	assert.NotContains(t, k.paths, newNested)
+	assert.NotContains(t, k.paths, newNestedFile)
+}
+
 func TestKqueueAddWatchHiddenPaths(t *testing.T) {
 	for _, tc := range []struct {
 		name          string

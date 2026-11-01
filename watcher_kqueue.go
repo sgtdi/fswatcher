@@ -140,8 +140,11 @@ func (w *watcher) processKqueueEvents(k *kqueue, events []unix.Kevent_t) {
 		}
 		if flags&unix.NOTE_WRITE == unix.NOTE_WRITE || flags&unix.NOTE_EXTEND == unix.NOTE_EXTEND {
 			if k.dirs[path] {
-				// Directory changed, mark for scan
-				dirsToScan[path] = struct{}{}
+				// Top-level watches need direct-child descriptors so directory
+				// entries can be detected, but must not scan those child dirs.
+				if w.shouldScanKqueueDirectory(path) {
+					dirsToScan[path] = struct{}{}
+				}
 			} else {
 				types = append(types, EventMod)
 			}
@@ -166,6 +169,11 @@ func (w *watcher) processKqueueEvents(k *kqueue, events []unix.Kevent_t) {
 	for dirPath := range dirsToScan {
 		w.scanDirectoryLocked(k, dirPath)
 	}
+}
+
+func (w *watcher) shouldScanKqueueDirectory(path string) bool {
+	watchPath := w.findMostSpecificWatchPath(path)
+	return watchPath == nil || watchPath.Depth != WatchTopLevel || filepath.Clean(path) == filepath.Clean(watchPath.Path)
 }
 
 // scanDirectoryLocked checks for new files in a watched dir
@@ -375,7 +383,13 @@ func (k *kqueue) addWatch(watchPath *WatchPath) error {
 			}
 			return nil
 		}
-		return k.addSingleWatchLocked(path)
+		if err := k.addSingleWatchLocked(path); err != nil {
+			return err
+		}
+		if watchPath.Depth == WatchTopLevel && path != watchPath.Path && d.IsDir() {
+			return fs.SkipDir
+		}
+		return nil
 	})
 }
 
