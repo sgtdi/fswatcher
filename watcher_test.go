@@ -323,6 +323,39 @@ func TestWatcher(t *testing.T) {
 		assert.True(t, eventPaths[thirdFile], "Should have seen event for file in remaining path")
 	})
 
+	t.Run("DropDeletedPath", func(t *testing.T) {
+		root := t.TempDir()
+		child := filepath.Join(root, "child")
+		require.NoError(t, os.Mkdir(child, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(child, "file.txt"), []byte("data"), 0644))
+
+		ready := make(chan struct{})
+		w, err := New(WithPath(root), WithReadyChannel(ready), WithSeverity(SeverityNone))
+		require.NoError(t, err)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		watchErr := make(chan error, 1)
+		go func() { watchErr <- w.Watch(ctx) }()
+
+		select {
+		case <-ready:
+		case <-time.After(5 * time.Second):
+			t.Fatal("watcher did not become ready")
+		}
+
+		require.NoError(t, os.RemoveAll(root))
+		require.NoError(t, w.DropPath(root))
+		assert.Empty(t, w.Paths())
+
+		cancel()
+		select {
+		case err := <-watchErr:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("watcher did not stop")
+		}
+	})
+
 	t.Run("AddDropPathConcurrentOps", func(t *testing.T) {
 		baseDir := t.TempDir()
 		otherDir := t.TempDir()

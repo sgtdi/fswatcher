@@ -398,7 +398,7 @@ func (w *watcher) DropPath(path string) error {
 	w.opsMu.Lock()
 	defer w.opsMu.Unlock()
 
-	wp, err := validateWatchPath(path, WatchNested) // Depth doesn't matter for removal
+	wp, err := cleanWatchPath(path)
 	if err != nil {
 		return err
 	}
@@ -421,6 +421,20 @@ func (w *watcher) DropPath(path string) error {
 
 	w.logInfo("Successfully removed watch path", "path", wp.Path)
 	return nil
+}
+
+// cleanWatchPath normalizes a path used to remove an existing watch without
+// requiring the directory to still exist. A watched directory can be deleted
+// or renamed before the caller gets a chance to drop it.
+func cleanWatchPath(path string) (*WatchPath, error) {
+	if path == "" {
+		return nil, newError("DropPath", "", errors.New("path cannot be empty"))
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, newError("DropPath", path, fmt.Errorf("failed to get absolute path: %w", err))
+	}
+	return &WatchPath{Path: filepath.Clean(absPath), Depth: WatchNested}, nil
 }
 
 // Events returns the event channel

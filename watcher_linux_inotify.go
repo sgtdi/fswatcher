@@ -431,7 +431,10 @@ func (p *inotify) removeWatch(path string) error {
 	node := p.trie.findNode(path)
 	if node == nil {
 		p.mu.RUnlock()
-		return newError("removeWatch", path, errors.New("watch not found for path"))
+		// The kernel can invalidate and remove inotify watches as soon as a
+		// watched directory is deleted. The public watch entry remains until
+		// DropPath is called, so absence in the backend is already removed.
+		return nil
 	}
 
 	// Hold the read lock during the entire traversal
@@ -439,8 +442,17 @@ func (p *inotify) removeWatch(path string) error {
 	p.mu.RUnlock()
 
 	if len(wdsToRemove) == 0 {
-		// Node exists but has no associated watch descriptor
-		return newError("removeWatch", path, errors.New("watch not found for path"))
+		// Keep the trie consistent after IN_IGNORED events for deleted paths.
+		p.mu.Lock()
+		newTrie := newPathTrieNode()
+		for wd, wp := range p.wds {
+			if wp != nil {
+				newTrie.insert(wp.Path, wd)
+			}
+		}
+		p.trie = newTrie
+		p.mu.Unlock()
+		return nil
 	}
 
 	for _, wd := range wdsToRemove {

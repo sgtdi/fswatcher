@@ -265,7 +265,9 @@ func (w *watcher) removeWatch(path string) error {
 
 	wpAny, exists := w.streams[path]
 	if !exists {
-		return fmt.Errorf("path %s is not being monitored", path)
+		// Windows can complete and release a directory handle after the
+		// directory is removed. DropPath still needs to clear its public entry.
+		return nil
 	}
 	wp := wpAny.(*watchedPath)
 	pathMap := w.streams["pathMap"].(map[uintptr]*watchedPath)
