@@ -65,6 +65,20 @@ func TestMain(m *testing.M) {
 }
 
 func TestWatcher(t *testing.T) {
+	t.Run("PlatformStopsUnexpectedly", func(t *testing.T) {
+		platformDone := make(chan struct{})
+		close(platformDone)
+		require.ErrorContains(t, waitForWatchStop(context.Background(), platformDone), "stopped unexpectedly")
+	})
+
+	t.Run("PlatformStopsAfterCancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		platformDone := make(chan struct{})
+		close(platformDone)
+		require.NoError(t, waitForWatchStop(ctx, platformDone))
+	})
+
 	t.Run("InvalidBufferSizeReturnsError", func(t *testing.T) {
 		assert.NotPanics(t, func() {
 			w, err := New(WithPath(tempDir), WithBufferSize(0))

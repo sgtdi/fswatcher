@@ -309,8 +309,11 @@ func (w *watcher) Watch(ctx context.Context) (retErr error) {
 	}
 	startup = true
 
-	// Wait for the context to be canceled
-	<-watchCtx.Done()
+	// A backend can exhaust its retry budget and stop while the caller's
+	// context is still active. Don't leave Watch blocked in that case.
+	if err := waitForWatchStop(watchCtx, done); err != nil {
+		retErr = newError("watch", "", err)
+	}
 
 	// Wait for the platform watcher to shut down completely
 	<-done
@@ -336,7 +339,20 @@ func (w *watcher) Watch(ctx context.Context) (retErr error) {
 			fmt.Fprintf(os.Stderr, "fswatcher: error closing log file: %v\n", err)
 		}
 	}
-	return nil
+	return retErr
+}
+
+func waitForWatchStop(ctx context.Context, platformDone <-chan struct{}) error {
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-platformDone:
+		// Cancellation wins if it raced with backend shutdown.
+		if ctx.Err() != nil {
+			return nil
+		}
+		return errors.New("platform watcher stopped unexpectedly")
+	}
 }
 
 // AddPath adds a new directory to watch at runtime
