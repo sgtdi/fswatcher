@@ -1,4 +1,4 @@
-//go:build darwin && !cgo
+//go:build (darwin && !cgo) || freebsd || openbsd || netbsd || dragonfly
 
 package fswatcher
 
@@ -186,7 +186,7 @@ func TestProcessKqueueEvents(t *testing.T) {
 	// Construct a fake event
 	events := []unix.Kevent_t{
 		{
-			Ident:  uint64(fd),
+			Ident:  kqueueIdent(fd),
 			Fflags: unix.NOTE_WRITE,
 		},
 	}

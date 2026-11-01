@@ -130,6 +130,7 @@ Customize the watcher's behavior using functional options passed to `fswatcher.N
 | `WithMaxWait(d)` | Caps aggregation latency for a path during continuous changes. `0` disables the cap | `max(1s, cooldown)` |
 | `WithMaxPendingEvents(n)` | Bounds pending paths; reaching the limit delivers a pending event early | `4096` |
 | `WithBufferSize(size)`      | Sets the size of the main event channel | `4096` |
+| `WithReadBufferSize(bytes)` | Sets the native read buffer, from 4 KiB to 1 MiB; Windows network watches cap it at 64 KiB | `64 KiB` |
 | `WithIncRegex(patterns...)` | Global include regex patterns — only matching paths are processed. If not set, all non-excluded paths are processed | (none) |
 | `WithExcRegex(patterns...)` | Global exclude regex patterns — matching paths are ignored. Exclusions take precedence over inclusions | (none) |
 | `WithHidden()`              | Includes hidden files and directories. By default, dot-prefixed paths are excluded on Unix-like platforms; Windows `FILE_ATTRIBUTE_HIDDEN` and macOS/FreeBSD `UF_HIDDEN` paths are also excluded. System and temporary ignore patterns still apply | Excluded |

@@ -74,6 +74,13 @@ jobs:
                     fi
                   fi
 
+            - name: "Run privileged fanotify integration"
+              if: runner.os == 'Linux'
+              shell: bash
+              run: |
+                  go test -c -o "$RUNNER_TEMP/fanotify.test" .
+                  sudo env FSWATCHER_REQUIRE_FANOTIFY=1 "$RUNNER_TEMP/fanotify.test" -test.run '^TestFanotify_Backend$' -test.v -test.timeout=30s
+
             - name: "Verify BSD Compilation"
               if: runner.os == 'Linux' # Run verification on Linux runner
               run: |

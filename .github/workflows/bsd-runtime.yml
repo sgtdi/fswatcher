@@ -1,0 +1,73 @@
+name: BSD runtime tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bsd:
+    name: Test on ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [freebsd, openbsd, netbsd, dragonfly]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Compile native test binary
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p .ci-bin
+          go test -c -o .ci-bin/fswatcher.test .
+      - name: Run FreeBSD tests
+        if: matrix.os == 'freebsd'
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1
+        with:
+          usesh: true
+          sync: rsync
+          run: |
+            ulimit -n 4096
+            .ci-bin/fswatcher.test -test.v -test.timeout=120s
+      - name: Run OpenBSD tests
+        if: matrix.os == 'openbsd'
+        uses: vmactions/openbsd-vm@f1ca8bc8ecc5b6ef7218e5b914836e067e1546d3 # v1
+        with:
+          usesh: true
+          sync: rsync
+          run: |
+            ulimit -n 4096
+            .ci-bin/fswatcher.test -test.v -test.timeout=120s
+      - name: Run NetBSD tests
+        if: matrix.os == 'netbsd'
+        uses: vmactions/netbsd-vm@c8a0d7ddb84619a7a8cc4e652efa7950b3fd9f92 # v1
+        with:
+          usesh: true
+          sync: rsync
+          run: |
+            ulimit -n 4096
+            .ci-bin/fswatcher.test -test.v -test.timeout=120s
+      - name: Run DragonFly tests
+        if: matrix.os == 'dragonfly'
+        uses: vmactions/dragonflybsd-vm@4ab776fa9f914fbea72f13715b451e77e7ef5c41 # v1
+        with:
+          usesh: true
+          sync: rsync
+          run: |
+            ulimit -n 4096
+            .ci-bin/fswatcher.test -test.v -test.timeout=120s

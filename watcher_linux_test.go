@@ -4,6 +4,7 @@ package fswatcher
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,74 +19,51 @@ import (
 // TestFanotify_Backend tests the fanotify backend initialization
 func TestFanotify_Backend(t *testing.T) {
 	if os.Getuid() != 0 {
-		t.Skip("Skipping fanotify test: requires root (CAP_SYS_ADMIN)")
+		t.Skip("requires CAP_SYS_ADMIN and CAP_DAC_READ_SEARCH")
 	}
-	// Fanotify requires CAP_SYS_ADMIN
-	tempDir, err := os.MkdirTemp(".", "fanotify_test_")
+	root := canonicalTempDir(t)
+	for _, dir := range []string{"a/nested", "b"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0700))
+	}
+	ready := make(chan struct{})
+	wi, err := New(WithPath(root), WithLinuxPlatform(PlatformFanotify), WithReadyChannel(ready), WithCooldown(time.Millisecond), WithSeverity(SeverityDebug), WithLogFile("stdout"))
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
-	readyChan := make(chan struct{})
-	w, err := New(
-		WithPath(tempDir),
-		WithLinuxPlatform(PlatformFanotify),
-		WithReadyChannel(readyChan),
-		WithCooldown(10*time.Millisecond),
-		WithSeverity(SeverityDebug),
-		WithLogFile("stdout"),
-	)
-	require.NoError(t, err)
-
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() {
-		_ = w.Watch(ctx)
-	}()
-
+	stopped := make(chan struct{})
+	var watchErr error
+	go func() { watchErr = wi.Watch(ctx); close(stopped) }()
+	defer func() { cancel(); <-stopped }()
 	select {
-	case <-readyChan:
+	case <-ready:
+	case <-stopped:
+		if os.Getenv("FSWATCHER_REQUIRE_FANOTIFY") != "1" && (errors.Is(watchErr, unix.EPERM) || errors.Is(watchErr, unix.EOPNOTSUPP) || errors.Is(watchErr, unix.ENOSYS)) {
+			t.Skipf("fanotify unavailable: %v", watchErr)
+		}
+		require.NoError(t, watchErr)
+		t.Fatal("watcher stopped before ready")
 	case <-time.After(5 * time.Second):
-		t.Fatal("Watcher failed to start")
+		t.Fatal("fanotify did not become ready")
 	}
-
-	wImpl := w.(*watcher)
-	wImpl.streamMu.Lock()
-	platform := wImpl.streams["platform"]
-	wImpl.streamMu.Unlock()
-	assert.IsType(t, &fanotify{}, platform, "Should be using fanotify backend")
-
-	var events []WatchEvent
-	var mu sync.Mutex
-	done := make(chan struct{})
-
-	go func() {
-		for event := range w.Events() {
-			mu.Lock()
-			events = append(events, event)
-			mu.Unlock()
+	for _, name := range []string{"a/nested/one.txt", "b/two.txt"} {
+		file := filepath.Join(root, name)
+		require.NoError(t, os.WriteFile(file, []byte("data"), 0600))
+		timeout := time.NewTimer(3 * time.Second)
+	found:
+		for {
+			select {
+			case event := <-wi.Events():
+				if event.Path == file {
+					break found
+				}
+			case <-timeout.C:
+				t.Fatalf("no fanotify event for %s", file)
+			}
 		}
-		close(done)
-	}()
-
-	testFile := filepath.Join(tempDir, "test_fanotify.txt")
-	err = os.WriteFile(testFile, []byte("data"), 0644)
-	require.NoError(t, err)
-
-	time.Sleep(200 * time.Millisecond)
+		timeout.Stop()
+	}
 	cancel()
-	<-done
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	found := false
-	for _, e := range events {
-		if e.Path == testFile {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "Should have received an event for the file using fanotify")
+	<-stopped
+	require.NoError(t, watchErr)
 }
 
 func TestFanotifyRecursiveMarksAndDynamicDirectories(t *testing.T) {
