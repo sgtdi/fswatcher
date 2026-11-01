@@ -62,6 +62,7 @@ type EventAggregator struct {
 	cooldown   time.Duration
 	maxWait    time.Duration
 	maxPending int
+	sequence   uint64
 	watcher    *watcher
 	mu         sync.Mutex
 	isClosed   atomic.Bool
@@ -176,6 +177,7 @@ func (ea *EventAggregator) addEvent(event WatchEvent) {
 	}
 
 	now := time.Now()
+	ea.sequence++
 	deadline := now.Add(ea.cooldown)
 	if ea.maxWait > 0 && ea.maxWait < ea.cooldown {
 		deadline = now.Add(ea.maxWait)
@@ -205,7 +207,7 @@ func (ea *EventAggregator) addEvent(event WatchEvent) {
 		// Update existing event
 		existing.lastSeen = now
 		existing.deadline = deadline
-		existing.version++
+		existing.version = ea.sequence
 		if event.ID > existing.eventID {
 			existing.eventID = event.ID
 		}
@@ -229,7 +231,7 @@ func (ea *EventAggregator) addEvent(event WatchEvent) {
 			firstSeen: now,
 			eventID:   event.ID,
 			deadline:  deadline,
-			version:   1,
+			version:   ea.sequence,
 			heapIndex: -1,
 		}
 		existing.addTypes(event.Types)

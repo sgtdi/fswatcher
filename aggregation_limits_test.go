@@ -86,3 +86,19 @@ func TestAggregationLimitOptions(t *testing.T) {
 	require.Zero(t, wi.(*watcher).aggregator.maxWait)
 	require.Equal(t, 2, wi.(*watcher).aggregator.maxPending)
 }
+
+func TestAggregationEvictionDoesNotFlushRecreatedPathEarly(t *testing.T) {
+	w := &watcher{events: make(chan WatchEvent, 3), maxPending: 1}
+	ea := newEventAggregator(w, time.Hour)
+	defer ea.close()
+	ea.addEvent(WatchEvent{Path: "x", Types: []EventType{EventCreate}})
+	ea.mu.Lock()
+	oldVersion := ea.events["x"].version
+	ea.mu.Unlock()
+	ea.addEvent(WatchEvent{Path: "y", Types: []EventType{EventCreate}})
+	ea.addEvent(WatchEvent{Path: "x", Types: []EventType{EventMod}})
+	ea.flushPath("x", oldVersion, false)
+	require.Len(t, w.events, 2, "a stale timer must not flush a new generation at the same path")
+	ea.close()
+	require.Len(t, w.events, 3)
+}
