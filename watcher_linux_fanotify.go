@@ -6,7 +6,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -21,10 +23,18 @@ const mountCacheMaxSize = 256
 // fanotify is the fanotify platform implementation
 type fanotify struct {
 	fd              int
-	paths           map[string]struct{}
-	mountCache      map[uint64]string // Cache for FSID to mount path resolution
-	mountCacheOrder []uint64          // FIFO insertion order for eviction
+	paths           map[string]struct{} // configured watch roots, used for handle resolution
+	roots           map[string]*fanotifyRoot
+	markRefs        map[string]int
+	markFn          func(path string, add bool) error // injectable mark operation for tests
+	mountCache      map[uint64]string                 // Cache for FSID to mount path resolution
+	mountCacheOrder []uint64                          // FIFO insertion order for eviction
 	mu              sync.RWMutex
+}
+
+type fanotifyRoot struct {
+	depth WatchDepth
+	dirs  map[string]struct{}
 }
 
 func removeFSIDFromOrder(order []uint64, fsid uint64) []uint64 {
@@ -85,6 +95,8 @@ func newFanotify() (*fanotify, error) {
 	return &fanotify{
 		fd:         fd,
 		paths:      make(map[string]struct{}),
+		roots:      make(map[string]*fanotifyRoot),
+		markRefs:   make(map[string]int),
 		mountCache: make(map[uint64]string),
 	}, nil
 }
@@ -93,20 +105,7 @@ func newFanotify() (*fanotify, error) {
 func (w *watcher) runFanotifyLoop(ctx context.Context, p *fanotify, done chan struct{}) {
 	defer func() {
 		w.logDebug("fanotify platform shutting down...")
-		p.mu.RLock()
-		var ps []string
-		for path := range p.paths {
-			ps = append(ps, path)
-		}
-		p.mu.RUnlock()
-
-		for _, path := range ps {
-			_ = unix.FanotifyMark(p.fd, uint(unix.FAN_MARK_REMOVE|unix.FAN_MARK_ONLYDIR), ^uint64(0), unix.AT_FDCWD, path)
-		}
-
-		p.mu.Lock()
-		p.paths = make(map[string]struct{})
-		p.mu.Unlock()
+		p.closeMarks()
 
 		_ = unix.Close(p.fd)
 		close(done)
@@ -176,6 +175,11 @@ func (w *watcher) runFanotifyLoop(ctx context.Context, p *fanotify, done chan st
 				break
 			}
 			meta := (*unix.FanotifyEventMetadata)(unsafe.Pointer(&buf[offset]))
+			if meta.Mask&unix.FAN_Q_OVERFLOW != 0 {
+				w.dispatchFanotifyEvent(p, "", meta.Mask)
+				offset += int(meta.Event_len)
+				continue
+			}
 
 			// Check for structural validity
 			if meta.Event_len < unix.FAN_EVENT_METADATA_LEN || int(meta.Event_len) > (n-offset) {
@@ -196,7 +200,7 @@ func (w *watcher) runFanotifyLoop(ctx context.Context, p *fanotify, done chan st
 			}
 
 			if err == nil && path != "" {
-				w.dispatchFanotifyEvent(path, meta.Mask)
+				w.dispatchFanotifyEvent(p, path, meta.Mask)
 			} else if err != nil {
 				w.logDebug("fanotify resolve error", "error", err)
 			}
@@ -344,7 +348,31 @@ func (p *fanotify) resolveHandlePath(fsid uint64, fileHandle unix.FileHandle) (s
 	return "", fmt.Errorf("no watched mount path available for fsid %d", fsid)
 }
 
-func (w *watcher) dispatchFanotifyEvent(path string, mask uint64) {
+func (w *watcher) dispatchFanotifyEvent(p *fanotify, path string, mask uint64) {
+	if mask&unix.FAN_Q_OVERFLOW != 0 {
+		w.logWarn("fanotify event queue overflowed; some filesystem events were lost")
+		w.handlePlatformEvent(WatchEvent{
+			Types: []EventType{EventOverflow},
+			Time:  time.Now(),
+		})
+		p.reconcileWatchDirs(w)
+		return
+	}
+
+	path = filepath.Clean(path)
+	if mask&unix.FAN_ONDIR != 0 || mask&(unix.FAN_DELETE_SELF|unix.FAN_MOVE_SELF) != 0 {
+		if mask&(unix.FAN_CREATE|unix.FAN_MOVED_TO) != 0 {
+			if err := p.addDirectoryTree(w, path); err != nil {
+				w.logWarn("Failed to add fanotify marks for new directory tree", "path", path, "error", err)
+			}
+		}
+		if mask&(unix.FAN_DELETE|unix.FAN_MOVED_FROM|unix.FAN_DELETE_SELF|unix.FAN_MOVE_SELF) != 0 {
+			if err := p.removeDirectoryTree(path); err != nil {
+				w.logWarn("Failed to remove stale fanotify directory marks", "path", path, "error", err)
+			}
+		}
+	}
+
 	var types []EventType
 	if mask&unix.FAN_CREATE == unix.FAN_CREATE {
 		types = append(types, EventCreate)
@@ -374,10 +402,8 @@ func (w *watcher) dispatchFanotifyEvent(path string, mask uint64) {
 	}
 }
 
-// addWatch adds a directory mark to fanotify
-func (p *fanotify) addWatch(_ *watcher, watchPath *WatchPath) error {
-	path := watchPath.Path
-	mask := uint64(
+func fanotifyWatchMask() uint64 {
+	return uint64(
 		unix.FAN_CREATE |
 			unix.FAN_DELETE |
 			unix.FAN_MODIFY |
@@ -387,29 +413,234 @@ func (p *fanotify) addWatch(_ *watcher, watchPath *WatchPath) error {
 			unix.FAN_ATTRIB |
 			unix.FAN_DELETE_SELF |
 			unix.FAN_MOVE_SELF |
+			unix.FAN_ONDIR |
 			unix.FAN_EVENT_ON_CHILD,
 	)
+}
 
-	// FAN_MARK_FILESYSTEM couk be better for full coverage but requires mount point
-	flags := uint(unix.FAN_MARK_ADD | unix.FAN_MARK_ONLYDIR)
+func (p *fanotify) markDirectory(path string, add bool) error {
+	if p.markFn != nil {
+		return p.markFn(path, add)
+	}
+	flags := uint(unix.FAN_MARK_ONLYDIR)
+	if add {
+		flags |= unix.FAN_MARK_ADD
+	} else {
+		flags |= unix.FAN_MARK_REMOVE
+	}
+	return unix.FanotifyMark(p.fd, flags, fanotifyWatchMask(), unix.AT_FDCWD, path)
+}
 
-	// Check if the path exists before marking
-	if err := unix.FanotifyMark(p.fd, flags, mask, unix.AT_FDCWD, path); err != nil {
+func collectFanotifyDirectories(w *watcher, root string, depth WatchDepth) ([]string, error) {
+	dirs := []string{filepath.Clean(root)}
+	if depth == WatchTopLevel {
+		return dirs, nil
+	}
+
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if filepath.Clean(path) == filepath.Clean(root) {
+				return err
+			}
+			if entry != nil && entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if filepath.Clean(path) == filepath.Clean(root) || !entry.IsDir() {
+			return nil
+		}
+		if !w.includeHidden && isHiddenPathWithin(path, root) {
+			return fs.SkipDir
+		}
+		dirs = append(dirs, filepath.Clean(path))
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return dirs, nil
+}
+
+// addDirectoriesLocked attaches marks not already owned by root. The caller
+// must hold p.mu.
+func (p *fanotify) addDirectoriesLocked(root *fanotifyRoot, dirs []string) error {
+	var added []string
+	for _, dir := range dirs {
+		dir = filepath.Clean(dir)
+		if _, exists := root.dirs[dir]; exists {
+			continue
+		}
+		if p.markRefs[dir] == 0 {
+			if err := p.markDirectory(dir, true); err != nil {
+				for i := len(added) - 1; i >= 0; i-- {
+					p.releaseDirectoryLocked(root, added[i])
+				}
+				return err
+			}
+		}
+		p.markRefs[dir]++
+		root.dirs[dir] = struct{}{}
+		added = append(added, dir)
+	}
+	return nil
+}
+
+func (p *fanotify) releaseDirectoryLocked(root *fanotifyRoot, dir string) error {
+	if _, exists := root.dirs[dir]; !exists {
+		return nil
+	}
+	refs := p.markRefs[dir]
+	if refs <= 1 {
+		if err := p.markDirectory(dir, false); err != nil && !errors.Is(err, unix.ENOENT) {
+			return err
+		}
+		delete(p.markRefs, dir)
+	} else {
+		p.markRefs[dir] = refs - 1
+	}
+	delete(root.dirs, dir)
+	return nil
+}
+
+func (p *fanotify) releaseDirectoriesLocked(root *fanotifyRoot, path string) error {
+	var firstErr error
+	for dir := range root.dirs {
+		if dir != path && !isSubpath(path, dir) {
+			continue
+		}
+		if err := p.releaseDirectoryLocked(root, dir); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (p *fanotify) addWatch(w *watcher, watchPath *WatchPath) error {
+	path := filepath.Clean(watchPath.Path)
+	dirs, err := collectFanotifyDirectories(w, path, watchPath.Depth)
+	if err != nil {
 		return newError("createMarkFa", path, err)
 	}
 
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, exists := p.roots[path]; exists {
+		return fmt.Errorf("path %s is already being monitored", path)
+	}
+	root := &fanotifyRoot{depth: watchPath.Depth, dirs: make(map[string]struct{})}
+	if err := p.addDirectoriesLocked(root, dirs); err != nil {
+		return newError("createMarkFa", path, err)
+	}
+	p.roots[path] = root
 	p.paths[path] = struct{}{}
-	p.mu.Unlock()
 	return nil
 }
 
-func (p *fanotify) removeWatch(path string) error {
-	if err := unix.FanotifyMark(p.fd, uint(unix.FAN_MARK_REMOVE|unix.FAN_MARK_ONLYDIR), ^uint64(0), unix.AT_FDCWD, path); err != nil {
-		return newError("removeWatch", path, err)
+func (p *fanotify) addDirectoryTree(w *watcher, path string) error {
+	if !w.includeHidden {
+		if root := w.findMostSpecificWatchPath(path); root != nil && isHiddenPathWithin(path, root.Path) {
+			return nil
+		}
+	}
+	dirs, err := collectFanotifyDirectories(w, path, WatchNested)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // The new directory may have been removed before it was scanned.
+		}
+		return err
 	}
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	for rootPath, root := range p.roots {
+		if root.depth != WatchNested || (path != rootPath && !isSubpath(rootPath, path)) {
+			continue
+		}
+		if err := p.addDirectoriesLocked(root, dirs); err != nil {
+			return fmt.Errorf("mark subtree for %s: %w", rootPath, err)
+		}
+	}
+	return nil
+}
+
+func (p *fanotify) removeDirectoryTree(path string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var firstErr error
+	for _, root := range p.roots {
+		if err := p.releaseDirectoriesLocked(root, path); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (p *fanotify) reconcileWatchDirs(w *watcher) {
+	type rootSnapshot struct {
+		path  string
+		depth WatchDepth
+	}
+	p.mu.RLock()
+	roots := make([]rootSnapshot, 0, len(p.roots))
+	for path, root := range p.roots {
+		roots = append(roots, rootSnapshot{path: path, depth: root.depth})
+	}
+	p.mu.RUnlock()
+
+	for _, snapshot := range roots {
+		dirs, err := collectFanotifyDirectories(w, snapshot.path, snapshot.depth)
+		if err != nil {
+			w.logWarn("Failed to rescan fanotify watch root after queue overflow", "path", snapshot.path, "error", err)
+			continue
+		}
+		wanted := make(map[string]struct{}, len(dirs))
+		for _, dir := range dirs {
+			wanted[dir] = struct{}{}
+		}
+
+		p.mu.Lock()
+		root, exists := p.roots[snapshot.path]
+		if exists {
+			for dir := range root.dirs {
+				if _, keep := wanted[dir]; !keep {
+					if err := p.releaseDirectoryLocked(root, dir); err != nil {
+						w.logWarn("Failed to remove stale fanotify mark after queue overflow", "path", dir, "error", err)
+					}
+				}
+			}
+			if err := p.addDirectoriesLocked(root, dirs); err != nil {
+				w.logWarn("Failed to restore fanotify marks after queue overflow", "path", snapshot.path, "error", err)
+			}
+		}
+		p.mu.Unlock()
+	}
+}
+
+func (p *fanotify) closeMarks() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for path := range p.markRefs {
+		if err := p.markDirectory(path, false); err != nil && !errors.Is(err, unix.ENOENT) {
+			// Shutdown is best-effort; closing the fanotify group releases marks.
+		}
+	}
+	p.paths = make(map[string]struct{})
+	p.roots = make(map[string]*fanotifyRoot)
+	p.markRefs = make(map[string]int)
+}
+
+func (p *fanotify) removeWatch(path string) error {
+	path = filepath.Clean(path)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	root, exists := p.roots[path]
+	if !exists {
+		return nil
+	}
+	if err := p.releaseDirectoriesLocked(root, path); err != nil {
+		return newError("removeWatch", path, err)
+	}
+	delete(p.roots, path)
 	delete(p.paths, path)
-	p.mu.Unlock()
 	return nil
 }

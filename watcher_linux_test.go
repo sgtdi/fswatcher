@@ -88,6 +88,104 @@ func TestFanotify_Backend(t *testing.T) {
 	assert.True(t, found, "Should have received an event for the file using fanotify")
 }
 
+func TestFanotifyRecursiveMarksAndDynamicDirectories(t *testing.T) {
+	root := t.TempDir()
+	existing := filepath.Join(root, "existing", "nested")
+	require.NoError(t, os.MkdirAll(existing, 0o700))
+
+	w, err := New(WithPath(root), WithSeverity(SeverityNone))
+	require.NoError(t, err)
+	wImpl := w.(*watcher)
+	marked := make(map[string]int)
+	markCalls := make(map[string]int)
+	p := &fanotify{
+		fd:         -1,
+		paths:      make(map[string]struct{}),
+		roots:      make(map[string]*fanotifyRoot),
+		markRefs:   make(map[string]int),
+		mountCache: make(map[uint64]string),
+		markFn: func(path string, add bool) error {
+			if add {
+				marked[path]++
+				markCalls["+"+path]++
+			} else {
+				marked[path]--
+				markCalls["-"+path]++
+				if marked[path] == 0 {
+					delete(marked, path)
+				}
+			}
+			return nil
+		},
+	}
+	t.Cleanup(func() { wImpl.aggregator.close() })
+
+	wp, err := validateWatchPath(root, WatchNested)
+	require.NoError(t, err)
+	require.NoError(t, p.addWatch(wImpl, wp))
+	for _, path := range []string{root, filepath.Join(root, "existing"), existing} {
+		assert.Equal(t, 1, marked[path], "existing directory should have a fanotify mark")
+	}
+
+	created := filepath.Join(root, "created")
+	createdChild := filepath.Join(created, "child")
+	require.NoError(t, os.MkdirAll(createdChild, 0o700))
+	wImpl.dispatchFanotifyEvent(p, created, unix.FAN_CREATE|unix.FAN_ONDIR)
+	assert.Equal(t, 1, marked[created], "new directory should be marked")
+	assert.Equal(t, 1, marked[createdChild], "existing descendants should be marked")
+
+	require.NoError(t, os.RemoveAll(created))
+	wImpl.dispatchFanotifyEvent(p, created, unix.FAN_DELETE|unix.FAN_ONDIR)
+	assert.NotContains(t, marked, created)
+	assert.NotContains(t, marked, createdChild)
+	assert.Equal(t, 1, markCalls["-"+created])
+	assert.Equal(t, 1, markCalls["-"+createdChild])
+
+	hidden := filepath.Join(root, ".hidden")
+	require.NoError(t, os.Mkdir(hidden, 0o700))
+	wImpl.dispatchFanotifyEvent(p, hidden, unix.FAN_CREATE|unix.FAN_ONDIR)
+	assert.NotContains(t, marked, hidden, "hidden directories should stay unmarked by default")
+}
+
+func TestFanotifyOverflowEmitsEventAndReconcilesMarks(t *testing.T) {
+	root := t.TempDir()
+	w, err := New(WithPath(root), WithCooldown(time.Millisecond), WithSeverity(SeverityNone))
+	require.NoError(t, err)
+	wImpl := w.(*watcher)
+	marked := make(map[string]bool)
+	p := &fanotify{
+		fd:         -1,
+		paths:      make(map[string]struct{}),
+		roots:      make(map[string]*fanotifyRoot),
+		markRefs:   make(map[string]int),
+		mountCache: make(map[uint64]string),
+		markFn: func(path string, add bool) error {
+			if add {
+				marked[path] = true
+			} else {
+				delete(marked, path)
+			}
+			return nil
+		},
+	}
+	t.Cleanup(func() { wImpl.aggregator.close() })
+
+	wp, err := validateWatchPath(root, WatchNested)
+	require.NoError(t, err)
+	require.NoError(t, p.addWatch(wImpl, wp))
+	missed := filepath.Join(root, "created-before-overflow")
+	require.NoError(t, os.Mkdir(missed, 0o700))
+
+	wImpl.dispatchFanotifyEvent(p, "", unix.FAN_Q_OVERFLOW)
+	assert.True(t, marked[missed], "overflow reconciliation should restore marks for new directories")
+	select {
+	case event := <-w.Events():
+		assert.Contains(t, event.Types, EventOverflow)
+	case <-time.After(time.Second):
+		t.Fatal("expected an overflow event")
+	}
+}
+
 // TestInotify_Backend tests the inotify backend initialization
 func TestInotify_Backend(t *testing.T) {
 	tempDir := t.TempDir()
