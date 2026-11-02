@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -169,6 +170,9 @@ func (w *watcher) processKqueueEvents(k *kqueue, events []unix.Kevent_t) {
 		}
 		if flags&unix.NOTE_ATTRIB == unix.NOTE_ATTRIB {
 			types = append(types, EventChmod)
+			if k.dirs[path] && w.shouldScanKqueueDirectory(path) {
+				dirsToScan[path] = struct{}{}
+			}
 		}
 		if flags&unix.NOTE_WRITE == unix.NOTE_WRITE || flags&unix.NOTE_EXTEND == unix.NOTE_EXTEND {
 			if k.dirs[path] {
@@ -234,6 +238,7 @@ func (w *watcher) scanDirectoryLocked(k *kqueue, dirPath string) {
 	for _, entry := range entries {
 		fullPath := filepath.Join(dirPath, entry.Name())
 		if !k.w.includeHidden && k.w.isHiddenPathWithin(fullPath, fullPath) {
+			k.addHiddenAttributeWatchLocked(fullPath)
 			continue
 		}
 		if _, exists := k.paths[fullPath]; !exists {
@@ -295,6 +300,7 @@ func (k *kqueue) addWatchContentsLocked(root string) error {
 			return nil
 		}
 		if !k.w.includeHidden && k.w.isHiddenPathWithin(path, path) {
+			k.addHiddenAttributeWatchLocked(path)
 			if entry.IsDir() {
 				return fs.SkipDir
 			}
@@ -414,6 +420,7 @@ func (k *kqueue) addWatch(watchPath *WatchPath) error {
 			return nil
 		}
 		if !k.w.includeHidden && k.w.isHiddenPathWithin(path, path) {
+			k.addHiddenAttributeWatchLocked(path)
 			if d.IsDir() {
 				return fs.SkipDir
 			}
@@ -427,6 +434,18 @@ func (k *kqueue) addWatch(watchPath *WatchPath) error {
 		}
 		return nil
 	})
+}
+
+// Keep a descriptor for a native hidden flag so NOTE_ATTRIB can reveal that
+// the entry became visible. Its children remain pruned while it is hidden.
+// Dot-prefixed names become visible through renames, which the parent detects.
+func (k *kqueue) addHiddenAttributeWatchLocked(path string) {
+	if strings.HasPrefix(filepath.Base(path), ".") || !isPlatformHiddenComponent(path) {
+		return
+	}
+	if err := k.addSingleWatchLocked(path); err != nil {
+		k.w.logWarn("Failed to watch hidden attributes", "path", path, "error", err)
+	}
 }
 
 // addSingleWatchLocked adds a file/dir
