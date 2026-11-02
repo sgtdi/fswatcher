@@ -182,11 +182,11 @@ func (w *watcher) runInotifyLoop(ctx context.Context, p *inotify, done chan stru
 	}
 	defer unix.Close(epfd)
 
-	go func() {
-		<-ctx.Done()
+	stopWake := startCancellationWakeup(ctx, func() {
 		var val uint64 = 1
 		_, _ = unix.Write(eventFD, (*(*[8]byte)(unsafe.Pointer(&val)))[:])
-	}()
+	})
+	defer stopWake()
 
 	buf := make([]byte, w.readBufferSize)
 	epollEvents := make([]unix.EpollEvent, 2) // Waiting on two FDs: inotify and eventfd

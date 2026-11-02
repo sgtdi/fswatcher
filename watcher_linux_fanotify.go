@@ -121,11 +121,11 @@ func (w *watcher) runFanotifyLoop(ctx context.Context, p *fanotify, done chan st
 	}
 	defer unix.Close(eventFD)
 
-	go func() {
-		<-ctx.Done()
+	stopWake := startCancellationWakeup(ctx, func() {
 		var val uint64 = 1
 		_, _ = unix.Write(eventFD, (*(*[8]byte)(unsafe.Pointer(&val)))[:])
-	}()
+	})
+	defer stopWake()
 
 	buf := make([]byte, w.readBufferSize)
 	backoff := newBackoffState()

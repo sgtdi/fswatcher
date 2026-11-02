@@ -80,20 +80,18 @@ func (w *watcher) startPlatform(ctx context.Context) (<-chan struct{}, error) {
 	w.streams["pathCounter"] = uintptr(1) // Start counter at 1
 	done := make(chan struct{})
 
-	// Waits for the context to be canceled
-	go func() {
-		<-ctx.Done()
-		windows.PostQueuedCompletionStatus(iocp, 0, 0, nil)
-	}()
-
-	go w.runWindowsLoop(iocp, done)
+	go w.runWindowsLoop(ctx, iocp, done)
 
 	return done, nil
 }
 
 // runWindowsLoop is the main event processing loop for Windows
-func (w *watcher) runWindowsLoop(iocp windows.Handle, done chan struct{}) {
+func (w *watcher) runWindowsLoop(ctx context.Context, iocp windows.Handle, done chan struct{}) {
+	stopWake := startCancellationWakeup(ctx, func() {
+		_ = windows.PostQueuedCompletionStatus(iocp, 0, 0, nil)
+	})
 	defer func() {
+		stopWake()
 		w.lockPlatformShutdown()
 		defer w.opsMu.Unlock()
 		w.logDebug("Windows platform shutting down")

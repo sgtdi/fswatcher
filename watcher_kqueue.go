@@ -77,19 +77,12 @@ func (w *watcher) startPlatform(ctx context.Context) (<-chan struct{}, error) {
 
 // runKqueueLoop starts the event loop
 func (w *watcher) runKqueueLoop(ctx context.Context, k *kqueue, done chan struct{}) {
-	stopWake, wakeExited := make(chan struct{}), make(chan struct{})
-	go func() {
-		defer close(wakeExited)
-		select {
-		case <-ctx.Done():
-			_, _ = unix.Write(k.wakeWrite, []byte{1})
-		case <-stopWake:
-		}
-	}()
+	stopWake := startCancellationWakeup(ctx, func() {
+		_, _ = unix.Write(k.wakeWrite, []byte{1})
+	})
 	// Closes all open descriptors and kqueue instance
 	defer func() {
-		close(stopWake)
-		<-wakeExited
+		stopWake()
 		w.lockPlatformShutdown()
 		defer w.opsMu.Unlock()
 		w.logDebug("kqueue platform shutting down")
