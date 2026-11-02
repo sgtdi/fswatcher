@@ -8,11 +8,12 @@
 
 **A production-ready file watcher for Go with built-in debouncing and filtering.**
 
-FSWatcher is a robust, concurrent, and cross-platform file system watcher for Go. It provides a simple and powerful API to monitor directories for file system changes, designed for high-performance applications and development tools. The goal is to abstract away the complexities of platform-specific APIs, offering a unified, easy-to-use, and dependency-free interface.
+FSWatcher is a robust, concurrent, and cross-platform file system watcher for Go. It provides a simple API to monitor directories for file system changes, using native platform APIs through `golang.org/x/sys` and the standard library.
 
 ## Table of contents
 
 - [Supported platforms](#platforms)
+- [Requirements](#requirements)
 - [Why FSWatcher](#why-fswatcher)
 - [Quick start](#quick-start)
 - [What makes it different](#what-makes-it-different)
@@ -23,6 +24,10 @@ FSWatcher is a robust, concurrent, and cross-platform file system watcher for Go
 - [Project structure](#project-structure)
 - [Advanced usage](#advanced-usage)
 - [FAQ](#faq)
+
+## Requirements
+
+Go 1.27.3 or later is required. The default macOS backend also requires CGO and a C compiler; the kqueue backend can be built with `CGO_ENABLED=0`.
 
 ## Platforms
 
@@ -45,7 +50,7 @@ On macOS, FSWatcher supports two backends:
 2.  **kqueue (Pure Go):** Uses the BSD `kernel queue` notification interface. Allows building a static binary without CGO (`CGO_ENABLED=0`), with a shared backend usable on FreeBSD, OpenBSD, NetBSD, and DragonFly
 
 **Why use FSEvents (CGO)?**
-The `FSEvents` API is designed specifically for file system monitoring and includes OS-level coalescing. This makes it significantly more accurate and CPU-efficient than `kqueue` for high-volume operations. Benchmarks show `FSEvents` achieves 100% path detection accuracy where **`kqueue` may miss up to 30% of events** for short-lived files under heavy load.
+The `FSEvents` API monitors directory trees and includes OS-level coalescing. The kqueue backend needs a descriptor for each monitored entry and scans changed directories to discover new entries. Files created and removed before that scan can be missed.
 
 To use the `kqueue` backend on macOS, disable CGO when building:
 
@@ -183,7 +188,7 @@ The watcher operates in a clear, multi-stage pipeline. Each raw OS event goes th
 | :--- | :--- |
 | **OS API** | The OS (`FSEvents`, `inotify`, `ReadDirectoryChangesW`) captures a raw file system event |
 | **Filtering** | Hidden paths, system file rules, and regex patterns are checked. Excluded paths are dropped |
-| **Debouncing** | The event is held for the cooldown period. Subsequent events for the same path are merged. The timer resets on each new event |
+| **Debouncing** | Events for the same path are merged until the cooldown or maximum wait expires. Reaching the pending-path limit can deliver an event early |
 | **User channel** | The final, clean `WatchEvent` is sent to `Events()` |
 
 ## Event Aggregation
@@ -195,7 +200,10 @@ The `EventAggregator` works by:
 2.  **Type collection** — the final `WatchEvent` contains all unique `EventType` values (e.g., both `Create` and `Edit` if both occurred)
 3.  **Flag collection** — all platform-specific flags are collected and merged
 4.  **Deterministic ordering** — aggregated `Types` are sorted by enum order and `Flags` are sorted lexicographically
-5.  **Timer-based flushing** — an event is only sent after no new events for that path have arrived within the cooldown window
+5.  **Timer-based flushing** — an event is sent after the cooldown window or the `WithMaxWait` deadline, whichever comes first. The default maximum wait is `max(1s, cooldown)`; `WithMaxWait(0)` disables this deadline
+6.  **Bounded pending paths** — reaching `WithMaxPendingEvents` delivers a pending event early before accepting a new path. The default limit is 4096 paths
+
+Hidden paths are excluded by default. When a macOS or FreeBSD path becomes visible after its native hidden attribute is cleared, normal event delivery resumes, including monitoring descendants of a newly visible directory. Dot-prefixed Unix paths become visible by being renamed; `WithHidden()` includes them without that change.
 
 ## Project structure
 
@@ -213,7 +221,7 @@ The `EventAggregator` works by:
 ├── watcher_bsd.go             # BSD-specific initialization
 ├── watcher_linux.go           # Linux platform loader
 ├── watcher_linux_inotify.go   # Linux (inotify) implementation
-├── watcher_linux_fanotify.go  # Linux (fanotify) placeholder
+├── watcher_linux_fanotify.go  # Linux (fanotify; partial support)
 ├── watcher_windows.go         # Windows (ReadDirectoryChangesW) implementation
 ├── go.mod                     # Go module definition
 └── examples/
@@ -286,7 +294,7 @@ fsw, err := fswatcher.New(
 
 **3. What happens if the event buffer is full?**
 
-> If the main event channel is full, the watcher drops the oldest event and records it in the `Dropped()` channel. This prevents blocking the event processing pipeline under heavy load
+> If `Events()` is full, the incoming aggregated event is sent to `Dropped()`. If both channels are full or unable to receive it, the event is discarded and `EventsLost` is incremented. Delivery never blocks the event processing pipeline
 
 **4. Can I watch files, or only directories?**
 
