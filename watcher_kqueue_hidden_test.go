@@ -1,4 +1,4 @@
-//go:build (darwin && !cgo) || freebsd
+//go:build (darwin && (!cgo || ios)) || freebsd
 
 package fswatcher
 

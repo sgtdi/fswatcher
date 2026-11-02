@@ -2,6 +2,16 @@
 
 Notable changes are recorded here starting with version 2.0.0. Earlier release notes are available in [GitHub Releases](https://github.com/sgtdi/fswatcher/releases).
 
+## [Unreleased]
+
+### Added
+
+- Build on platforms without a native backend, such as js/wasm, wasip1 and plan9, where `Watch` returns the new `ErrUnsupportedPlatform`, which matches `errors.ErrUnsupported`. Programs that run on those platforms no longer need build tags to exclude the package.
+
+### Fixed
+
+- Use `kqueue` on iOS, where FSEvents is not available; building for iOS with CGO enabled failed.
+
 ## [2.0.0] - 2026-11-02
 
 ### Breaking changes

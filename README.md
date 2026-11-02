@@ -48,6 +48,8 @@ FSWatcher uses native OS APIs for efficient, low-overhead monitoring with near-z
 | ✅ **Linux** | `inotify` | Fully supported |
 | | `fanotify` | Partial support (recursive directory marks are best-effort and kernel/filesystem dependent) |
 | ✅ **Windows** | `ReadDirectoryChangesW` | Fully supported |
+| ✅ **iOS** | `kqueue` | Supported (FSEvents is not available on iOS) |
+| ⚪ **Other** (js/wasm, wasip1, plan9, ...) | None | Builds; `Watch` returns `ErrUnsupportedPlatform` |
 
 ### macOS and BSD Support
 
@@ -280,6 +282,7 @@ The `EventAggregator` works by:
 ├── watcher_linux_inotify.go   # Linux (inotify) implementation
 ├── watcher_linux_fanotify.go  # Linux (fanotify; partial support)
 ├── watcher_windows.go         # Windows (ReadDirectoryChangesW) implementation
+├── watcher_unsupported.go     # Other platforms: builds, Watch returns ErrUnsupportedPlatform
 ├── go.mod                     # Go module definition
 └── examples/
     └── main.go                # Example usage

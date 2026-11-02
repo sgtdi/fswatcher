@@ -1,6 +1,14 @@
 package fswatcher
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrUnsupportedPlatform is returned by Watch on platforms without a
+// native file system notification API, such as js/wasm and plan9.
+// It matches [errors.ErrUnsupported].
+var ErrUnsupportedPlatform = fmt.Errorf("file system watching is not supported on this platform: %w", errors.ErrUnsupported)
 
 // WatcherError is a structured error for watcher-related failures
 type WatcherError struct {
