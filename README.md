@@ -12,22 +12,27 @@ FSWatcher is a robust, concurrent, and cross-platform file system watcher for Go
 
 ## Table of contents
 
-- [Supported platforms](#platforms)
 - [Requirements](#requirements)
+- [Supported platforms](#platforms)
 - [Why FSWatcher](#why-fswatcher)
 - [Quick start](#quick-start)
 - [What makes it different](#what-makes-it-different)
 - [Options](#options)
+- [Updating existing callers](#updating-existing-callers)
 - [Methods](#methods)
 - [Logging](#logging)
 - [Workflow diagram](#workflow)
+- [Event aggregation](#event-aggregation)
 - [Project structure](#project-structure)
 - [Advanced usage](#advanced-usage)
+- [Testing](#testing)
 - [FAQ](#faq)
 
 ## Requirements
 
 Go 1.27.3 or later is required. The default macOS backend also requires CGO and a C compiler; the kqueue backend can be built with `CGO_ENABLED=0`.
+
+The library has one external runtime dependency, `golang.org/x/sys`. `github.com/stretchr/testify` and its YAML dependency are used only by the tests.
 
 ## Platforms
 
@@ -84,33 +89,31 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
+	"os/signal"
 	"time"
 
 	"github.com/sgtdi/fswatcher"
 )
 
 func main() {
-    // Create watcher with debouncing that watches the current working directory
-    w, _ := fswatcher.New(
-        fswatcher.WithCooldown(200*time.Millisecond),
-    )
+	// Watch the current working directory until Ctrl+C.
+	w, err := fswatcher.New(fswatcher.WithCooldown(200 * time.Millisecond))
+	if err != nil {
+		log.Fatal(err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	result := make(chan error, 1)
+	go func() { result <- w.Watch(ctx) }()
 
-    ctx := context.Background()
-    go w.Watch(ctx)
-    fmt.Println("fswatcher started, change a file in watcher dir")
-
-    // Process clean, debounced events
-    for event := range w.Events() {
-        var types, flags []string
-        // Loop through types and flags
-        for _, t := range event.Types {
-            types = append(types, t.String())
-        }
-        for _, f := range event.Flags {
-            flags = append(flags, f)
-        }
-        fmt.Printf("File changed: %s %v %v\n", event.Path, types, flags)
-    }
+	for event := range w.Events() {
+		fmt.Printf("File changed: %s %v\n", event.Path, event.Types)
+	}
+	if err := <-result; err != nil {
+		log.Fatal(err)
+	}
 }
 ```
 
@@ -126,16 +129,18 @@ func main() {
 
 ## Options
 
-Customize the watcher's behavior using functional options passed to `fswatcher.New()`.
+Pass watcher options to `fswatcher.New()`. Pass `PathOption` values, such as `WithDepth` and `WithEventMask`, to `WithPath()` or `AddPath()`.
 
 | Option                      | Description | Default |
 |:----------------------------| :--- | :--- |
-| `WithPath(path, ...)`       | Adds an initial directory to watch, resolving symbolic links to its canonical absolute path. Can be called multiple times. Accepts optional `PathOption` values like `WithDepth`, `WithEventMask`, `WithPathIncRegex`, etc | Current directory |
+| `WithPath(path, ...)`       | Adds an existing directory to watch, resolving symbolic links to its canonical absolute path. Can be called multiple times. Accepts optional `PathOption` values like `WithDepth`, `WithEventMask`, `WithPathIncRegex`, etc | Current directory |
 | `WithCooldown(d)`           | Sets the debouncing cooldown period. Events for the same path arriving within this duration will be merged | `100ms` |
 | `WithMaxWait(d)` | Caps aggregation latency for a path during continuous changes. `0` disables the cap | `max(1s, cooldown)` |
 | `WithMaxPendingEvents(n)` | Bounds pending paths; reaching the limit delivers a pending event early | `4096` |
 | `WithBufferSize(size)`      | Sets the size of the main event channel | `4096` |
 | `WithReadBufferSize(bytes)` | Sets the native read buffer, from 4 KiB to 1 MiB; Windows network watches cap it at 64 KiB | `64 KiB` |
+| `WithCustomChannels(events, dropped)` | Supplies caller-owned channels; each `nil` argument uses an internally allocated channel. Keep supplied channels open until `Watch()` returns; FSWatcher leaves them open | Internal channels |
+| `WithReadyChannel(ready)` | Closes `ready` after successful backend initialization and registration of the initial paths. Startup failures are returned by `Watch()` | (none) |
 | `WithIncRegex(patterns...)` | Global include regex patterns — only matching paths are processed. If not set, all non-excluded paths are processed | (none) |
 | `WithExcRegex(patterns...)` | Global exclude regex patterns — matching paths are ignored. Exclusions take precedence over inclusions | (none) |
 | `WithHidden()`              | Includes hidden files and directories. By default, dot-prefixed paths are excluded on Unix-like platforms; Windows `FILE_ATTRIBUTE_HIDDEN` and macOS/FreeBSD `UF_HIDDEN` paths are also excluded. System and temporary ignore patterns still apply | Excluded |
@@ -149,6 +154,27 @@ Customize the watcher's behavior using functional options passed to `fswatcher.N
 | `WithPathExcRegex(patterns...)` | Exclude regex patterns scoped to a specific path, independent of the global `WithExcRegex`. Passed to `WithPath` | (none) |
 | `WithPathFilter(filter)`    | Custom `PathFilter` implementation for a specific path. Passed to `WithPath` | (none) |
 
+Global and per-path filters both apply. If roots overlap, the most specific root determines the per-path filter, event mask, and depth. `EventOverflow` bypasses these filters and masks so consumers can reconcile lost changes.
+
+Custom `PathFilter` implementations must support concurrent calls to `ShouldInclude`.
+
+On Windows, a dot-prefixed name alone does not make a path hidden; the filesystem's `FILE_ATTRIBUTE_HIDDEN` attribute is used.
+
+When a macOS or FreeBSD path becomes visible after its native hidden attribute is cleared, normal event delivery resumes, including monitoring descendants of a newly visible directory. Dot-prefixed Unix paths become visible by being renamed; `WithHidden()` includes them without that change.
+
+## Updating existing callers
+
+Applications that require hidden paths and the previous unbounded debounce wait can explicitly configure both policies:
+
+```go
+w, err := fswatcher.New(
+    fswatcher.WithHidden(),
+    fswatcher.WithMaxWait(0),
+)
+```
+
+System and temporary ignore patterns remain active with `WithHidden()`. Root symlinks now resolve to canonical absolute paths, which are used in `Paths()` and event paths; `DropPath()` also accepts the original configured alias after it has been removed.
+
 ## Methods
 
 Once you have a `Watcher` instance from `New()`, you can use the following methods to control it:
@@ -157,12 +183,18 @@ Once you have a `Watcher` instance from `New()`, you can use the following metho
 | :--- | :--- |
 | `Watch(ctx)` | Starts the watcher. Blocking — runs until the context is canceled. Run in a goroutine. A watcher instance is single-use: after `Watch()` returns, create a new watcher with `New()` |
 | `Events()` | Returns a read-only channel (`<-chan WatchEvent`) for receiving file system events |
-| `AddPath(path)` | Adds a new directory to monitor at runtime. Safe to call concurrently with `DropPath()` |
+| `AddPath(path, options...)` | Adds a new directory to monitor at runtime. Accepts the same `PathOption` values as `WithPath`. Safe to call concurrently with `DropPath()` |
 | `DropPath(path)` | Stops monitoring a directory at runtime. Accepts the original alias even after that alias is removed. Safe to call concurrently with `AddPath()` |
 | `Close()` | Initiates a graceful shutdown — alternative to canceling the context |
 | `IsRunning()` | Returns `true` if `Watch()` is currently running |
+| `Paths()` | Returns the canonical absolute paths of configured roots |
 | `Stats()` | Returns runtime statistics, including processed, coalesced, dropped, filtered, and lost events. `EventsPartial` counts inotify registrations skipped at watch limits or failed during overflow recovery |
 | `Dropped()` | Returns a read-only channel for events dropped because the main `Events()` channel was full |
+| `Log(level, message, args...)` | Writes through the configured logger using a `Severity` level and structured arguments |
+
+`Close()` requests shutdown and returns immediately. Before `Watch()` returns, FSWatcher flushes pending aggregation, joins its delivery workers, closes its own event channels, and leaves custom channels open. Wait for this return before releasing caller-owned resources. If a ready channel is supplied, wait for either readiness or the result of `Watch()` so a startup failure cannot leave the caller waiting indefinitely.
+
+Removing an overlapping root preserves native watches still needed by other roots. On Windows, deleting one watched root releases that root's native watch while the other roots continue to run; `DropPath()` can remove the deleted root from the configured paths.
 
 An `EventOverflow` means some changes were lost. Reconcile your state with the filesystem, including deleted entries. Automatic scans can restore watch coverage and report existing files, but cannot reconstruct every lost change. Native read buffers must be at least 4 KiB; Windows network watches cap buffers at 64 KiB.
 
@@ -203,8 +235,6 @@ The `EventAggregator` works by:
 5.  **Timer-based flushing** — an event is sent after the cooldown window or the `WithMaxWait` deadline, whichever comes first. The default maximum wait is `max(1s, cooldown)`; `WithMaxWait(0)` disables this deadline
 6.  **Bounded pending paths** — reaching `WithMaxPendingEvents` delivers a pending event early before accepting a new path. The default limit is 4096 paths
 
-Hidden paths are excluded by default. When a macOS or FreeBSD path becomes visible after its native hidden attribute is cleared, normal event delivery resumes, including monitoring descendants of a newly visible directory. Dot-prefixed Unix paths become visible by being renamed; `WithHidden()` includes them without that change.
-
 ## Project structure
 
 ```
@@ -213,6 +243,9 @@ Hidden paths are excluded by default. When a macOS or FreeBSD path becomes visib
 ├── options.go                 # Configuration options (functional pattern)
 ├── event.go                   # Event definitions and aggregation logic
 ├── filters.go                 # Path filtering logic
+├── root_index.go              # Index of configured roots for event filtering
+├── wakeup.go                  # Cancellation signals joined before native cleanup
+├── hidden_*.go                # Platform-specific hidden attributes
 ├── logs.go                    # Logging helpers
 ├── errors.go                  # Custom error types
 ├── watcher_darwin.go          # macOS (Pure Go bridge)
@@ -237,30 +270,43 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
 
 	"github.com/sgtdi/fswatcher"
 )
 
 func main() {
-
+	ready := make(chan struct{})
 	fsw, err := fswatcher.New(
 		fswatcher.WithPath("./"),
+		fswatcher.WithReadyChannel(ready),
+		fswatcher.WithLogFile("stdout"),
 		fswatcher.WithSeverity(fswatcher.SeverityDebug),
 	)
 	if err != nil {
 		log.Fatalf("Failed to create watcher: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	go func() {
-		if err := fsw.Watch(ctx); err != nil && err != context.Canceled {
-			log.Printf("Watcher error: %v", err)
+	result := make(chan error, 1)
+	go func() { result <- fsw.Watch(ctx) }()
+	select {
+	case <-ready:
+		log.Println("Initial paths are ready")
+	case err := <-result:
+		if err != nil {
+			log.Fatal(err)
 		}
-	}()
+		return
+	}
 
 	for event := range fsw.Events() {
 		fmt.Printf("Received event:\n%s", event.String())
+	}
+	if err := <-result; err != nil {
+		log.Fatal(err)
 	}
 }
 ```
@@ -280,6 +326,39 @@ fsw, err := fswatcher.New(
         fswatcher.WithPathIncRegex(`\.ya?ml$`),
     ),
 )
+```
+
+## Testing
+
+Run the standard suite and consistency checks with the Go version required by `go.mod`:
+
+```sh
+go test -shuffle=on ./...
+go vet ./...
+go mod verify
+go mod tidy -diff
+```
+
+On platforms with race-detector support and CGO enabled:
+
+```sh
+go test -race -shuffle=on ./...
+```
+
+To exercise the kqueue backend on macOS:
+
+```sh
+CGO_ENABLED=0 go test -shuffle=on ./...
+```
+
+The [Go CI workflow](.github/workflows/ci-test.yml) runs native tests on Linux, Windows, and both macOS backends, plus privileged fanotify integration and BSD compilation checks. The [BSD runtime workflow](.github/workflows/bsd-runtime.yml) executes native test binaries in FreeBSD, OpenBSD, NetBSD, and DragonFly VMs. [CodeQL](.github/workflows/codeql.yml) provides automated static analysis.
+
+Fanotify integration requires suitable privileges and a filesystem that supports file handles. Setting `FSWATCHER_REQUIRE_FANOTIFY=1` makes an unavailable backend fail the integration test instead of skipping it; CI enables this for its privileged fanotify step.
+
+To scan the library and tests for known vulnerabilities:
+
+```sh
+go run golang.org/x/vuln/cmd/govulncheck@latest -test ./...
 ```
 
 ## FAQ
