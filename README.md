@@ -1,4 +1,4 @@
-[![Go Reference](https://pkg.go.dev/badge/github.com/sgtdi/fswatcher.svg)](https://pkg.go.dev/github.com/sgtdi/fswatcher)
+[![Go Reference](https://pkg.go.dev/badge/github.com/sgtdi/fswatcher/v2.svg)](https://pkg.go.dev/github.com/sgtdi/fswatcher/v2)
 [![Go Report Card](https://goreportcard.com/badge/github.com/sgtdi/fswatcher)](https://goreportcard.com/report/github.com/sgtdi/fswatcher)
 [![CI](https://github.com/sgtdi/fswatcher/actions/workflows/ci-test.yml/badge.svg)](https://github.com/sgtdi/fswatcher/actions/workflows/ci-test.yml)
 [![CodeQL](https://github.com/sgtdi/fswatcher/actions/workflows/codeql.yml/badge.svg)](https://github.com/sgtdi/fswatcher/actions/workflows/codeql.yml)
@@ -9,6 +9,8 @@
 **A production-ready file watcher for Go with built-in debouncing and filtering.**
 
 FSWatcher is a robust, concurrent, and cross-platform file system watcher for Go. It provides a simple API to monitor directories for file system changes, using native platform APIs through `golang.org/x/sys` and the standard library.
+
+See the [changelog](CHANGELOG.md) for release details and [Updating existing callers](#updating-existing-callers) for the v1-to-v2 migration.
 
 ## Table of contents
 
@@ -80,7 +82,7 @@ Most Go file watchers give you raw OS events—which means duplicate events and 
 To add FSWatcher to your project, use `go get`:
 
 ```sh
-go get github.com/sgtdi/fswatcher
+go get github.com/sgtdi/fswatcher/v2
 ```
 
 ```go
@@ -94,7 +96,7 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/sgtdi/fswatcher"
+	"github.com/sgtdi/fswatcher/v2"
 )
 
 func main() {
@@ -163,6 +165,28 @@ On Windows, a dot-prefixed name alone does not make a path hidden; the filesyste
 When a macOS or FreeBSD path becomes visible after its native hidden attribute is cleared, normal event delivery resumes, including monitoring descendants of a newly visible directory. Dot-prefixed Unix paths become visible by being renamed; `WithHidden()` includes them without that change.
 
 ## Updating existing callers
+
+Version 2 uses the module path `github.com/sgtdi/fswatcher/v2`, following [Go's major-version rules](https://go.dev/doc/modules/major-version). Upgrade the dependency and update every FSWatcher import:
+
+```sh
+go get github.com/sgtdi/fswatcher/v2@v2.0.0
+```
+
+```go
+import "github.com/sgtdi/fswatcher/v2"
+```
+
+Run `go mod tidy` in your application after updating imports. Existing v1 tags remain available through `github.com/sgtdi/fswatcher`.
+
+The native CI matrix also verifies that v1 and v2 can watch concurrently in the same application. The isolated compatibility test module under `integration/compat` keeps the legacy version out of the v2 module's dependency graph.
+
+Version 2 requires Go 1.27.3 or later and changes these defaults:
+
+- Hidden paths are excluded according to the platform's convention; use `WithHidden()` to include them.
+- Aggregation waits at most `max(1s, cooldown)` by default, and pending paths are limited to 4096. Capacity pressure can deliver a pending event early.
+- Watched roots and event paths use canonical absolute paths, including resolved root symlinks. Update path comparisons or regex filters that depended on an alias.
+- Native read buffers must be between 4 KiB and 1 MiB; Windows network watches cap them at 64 KiB.
+- Merged raw events are counted by `EventsCoalesced`; `EventsFiltered` counts events excluded by filters.
 
 Applications that require hidden paths and the previous unbounded debounce wait can explicitly configure both policies:
 
@@ -273,7 +297,7 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/sgtdi/fswatcher"
+	"github.com/sgtdi/fswatcher/v2"
 )
 
 func main() {
