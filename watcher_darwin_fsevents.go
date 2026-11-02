@@ -9,7 +9,7 @@ package fswatcher
 #include <stdio.h>
 
 // Go implementation must treat this data as read-only
-extern void goHandleFSEvent(
+extern void goHandleFSEventV2(
     uintptr_t handle,
     size_t numEvents,
     char** paths,
@@ -18,7 +18,7 @@ extern void goHandleFSEvent(
 );
 
 // Callback to log stream creation
-extern void goLogStreamSuccess(
+extern void goLogStreamSuccessV2(
     uintptr_t handle,
     char* path
 );
@@ -36,7 +36,7 @@ static void fsEventCallback(
         return;
     }
     // Cast void pointers to their concrete types
-    goHandleFSEvent(
+    goHandleFSEventV2(
         (uintptr_t)clientCallBackInfo,
         numEvents,
         (char**)eventPaths,
@@ -93,7 +93,7 @@ static FSEventStreamRef createAndScheduleStream(
     FSEventStreamSetDispatchQueue(stream, queue);
     dispatch_release(queue); // The stream retains the queue
 
-    if (debug) goLogStreamSuccess(handle, (char*)path);
+    if (debug) goLogStreamSuccessV2(handle, (char*)path);
     return stream;
 }
 */
@@ -208,10 +208,10 @@ func parseGenericEventFlags(flags uint32) []EventType {
 	return uniqueEventTypes(events)
 }
 
-// goHandleFSEvent is the CGo callback that processes events from the FSEvents API
+// goHandleFSEventV2 is the CGo callback that processes events from the FSEvents API
 //
-//export goHandleFSEvent
-func goHandleFSEvent(handle C.uintptr_t, numEvents C.size_t, cPaths **C.char, cFlags *C.FSEventStreamEventFlags, cIds *C.FSEventStreamEventId) {
+//export goHandleFSEventV2
+func goHandleFSEventV2(handle C.uintptr_t, numEvents C.size_t, cPaths **C.char, cFlags *C.FSEventStreamEventFlags, cIds *C.FSEventStreamEventId) {
 	watcherPtr, ok := watcherMap.Load(uintptr(handle))
 	if !ok {
 		return // Watcher was unregistered, ignore event
@@ -260,10 +260,10 @@ func (w *watcher) handleDarwinEvent(path string, flags uint32, id uint64, now ti
 	w.handlePlatformEvent(WatchEvent{ID: id, Path: path, Types: types, Flags: parseDarwinEventFlags(flags), Time: now})
 }
 
-// goLogStreamSuccess logs successful stream creation
+// goLogStreamSuccessV2 logs successful stream creation
 //
-//export goLogStreamSuccess
-func goLogStreamSuccess(handle C.uintptr_t, cPath *C.char) {
+//export goLogStreamSuccessV2
+func goLogStreamSuccessV2(handle C.uintptr_t, cPath *C.char) {
 	watcherPtr, ok := watcherMap.Load(uintptr(handle))
 	if !ok {
 		return
