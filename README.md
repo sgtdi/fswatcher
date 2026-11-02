@@ -32,7 +32,7 @@ See the [changelog](CHANGELOG.md) for release details and [Updating existing cal
 
 ## Requirements
 
-Go 1.27.3 or later is required. The default macOS backend also requires CGO and a C compiler; the kqueue backend can be built with `CGO_ENABLED=0`.
+Go 1.27.0 or later is required. The default macOS backend also requires CGO and a C compiler; the kqueue backend can be built with `CGO_ENABLED=0`.
 
 The library has one external runtime dependency, `golang.org/x/sys`. `github.com/stretchr/testify` and its YAML dependency are used only by the tests.
 
@@ -48,6 +48,8 @@ FSWatcher uses native OS APIs for efficient, low-overhead monitoring with near-z
 | ✅ **Linux** | `inotify` | Fully supported |
 | | `fanotify` | Partial support (recursive directory marks are best-effort and kernel/filesystem dependent) |
 | ✅ **Windows** | `ReadDirectoryChangesW` | Fully supported |
+| ✅ **iOS** | `kqueue` | Supported (FSEvents is not available on iOS) |
+| ⚪ **Other** (js/wasm, wasip1, plan9, ...) | None | Builds; `Watch` returns `ErrUnsupportedPlatform` |
 
 ### macOS and BSD Support
 
@@ -180,7 +182,7 @@ Run `go mod tidy` in your application after updating imports. Existing v1 tags r
 
 The native CI matrix also verifies that v1 and v2 can watch concurrently in the same application. The isolated compatibility test module under `integration/compat` keeps the legacy version out of the v2 module's dependency graph.
 
-Version 2 requires Go 1.27.3 or later and changes these defaults:
+Version 2 requires Go 1.27.0 or later and changes these defaults:
 
 - Hidden paths are excluded according to the platform's convention; use `WithHidden()` to include them.
 - Aggregation waits at most `max(1s, cooldown)` by default, and pending paths are limited to 4096. Capacity pressure can deliver a pending event early.
@@ -280,6 +282,7 @@ The `EventAggregator` works by:
 ├── watcher_linux_inotify.go   # Linux (inotify) implementation
 ├── watcher_linux_fanotify.go  # Linux (fanotify; partial support)
 ├── watcher_windows.go         # Windows (ReadDirectoryChangesW) implementation
+├── watcher_unsupported.go     # Other platforms: builds, Watch returns ErrUnsupportedPlatform
 ├── go.mod                     # Go module definition
 └── examples/
     └── main.go                # Example usage

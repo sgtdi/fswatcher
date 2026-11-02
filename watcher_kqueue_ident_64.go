@@ -1,4 +1,4 @@
-//go:build (darwin && !cgo) || dragonfly || ((freebsd || openbsd || netbsd) && !(386 || arm))
+//go:build (darwin && (!cgo || ios)) || dragonfly || ((freebsd || openbsd || netbsd) && !(386 || arm))
 
 package fswatcher
 
