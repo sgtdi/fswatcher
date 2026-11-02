@@ -151,7 +151,7 @@ func TestWatcherOptions(t *testing.T) {
 			require.Nil(t, w.init)
 			require.Len(t, w.paths, 1)
 
-			absPath, err := filepath.Abs(tempDir)
+			absPath, err := filepath.EvalSymlinks(tempDir)
 			require.NoError(t, err)
 
 			assert.Equal(t, absPath, w.paths[0].Path)
@@ -177,7 +177,7 @@ func TestWatcherOptions(t *testing.T) {
 			require.Len(t, w.paths, 1)
 
 			watchPath := w.paths[0]
-			absPath, err := filepath.Abs(tempDir)
+			absPath, err := filepath.EvalSymlinks(tempDir)
 			require.NoError(t, err)
 
 			assert.Equal(t, absPath, watchPath.Path)

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,12 +17,14 @@ import (
 
 // kqueue is the kernel queue-based implementation for macOS (without CGO) and BSD
 type kqueue struct {
-	w     *watcher
-	kqFd  int             // file descriptor
-	wds   map[int]string  // watch descriptors to paths
-	paths map[string]int  // paths to watch descriptors
-	dirs  map[string]bool // directories list
-	mu    sync.Mutex
+	w         *watcher
+	kqFd      int // file descriptor
+	wakeRead  int
+	wakeWrite int
+	wds       map[int]string  // watch descriptors to paths
+	paths     map[string]int  // paths to watch descriptors
+	dirs      map[string]bool // directories list
+	mu        sync.Mutex
 }
 
 // newKqueue creates a new instance of kqueue
@@ -30,12 +33,30 @@ func newKqueue(w *watcher) (*kqueue, error) {
 	if err != nil {
 		return nil, err
 	}
+	pipe := make([]int, 2)
+	if err := unix.Pipe(pipe); err != nil {
+		_ = unix.Close(kqFd)
+		return nil, err
+	}
+	for _, fd := range pipe {
+		unix.CloseOnExec(fd)
+		_ = unix.SetNonblock(fd, true)
+	}
+	change := []unix.Kevent_t{{Ident: kqueueIdent(pipe[0]), Filter: unix.EVFILT_READ, Flags: unix.EV_ADD | unix.EV_CLEAR}}
+	if _, err := unix.Kevent(kqFd, change, nil, nil); err != nil {
+		_ = unix.Close(pipe[0])
+		_ = unix.Close(pipe[1])
+		_ = unix.Close(kqFd)
+		return nil, err
+	}
 	return &kqueue{
-		w:     w,
-		kqFd:  kqFd,
-		wds:   make(map[int]string),
-		paths: make(map[string]int),
-		dirs:  make(map[string]bool),
+		w:         w,
+		kqFd:      kqFd,
+		wakeRead:  pipe[0],
+		wakeWrite: pipe[1],
+		wds:       make(map[int]string),
+		paths:     make(map[string]int),
+		dirs:      make(map[string]bool),
 	}, nil
 }
 
@@ -57,14 +78,22 @@ func (w *watcher) startPlatform(ctx context.Context) (<-chan struct{}, error) {
 
 // runKqueueLoop starts the event loop
 func (w *watcher) runKqueueLoop(ctx context.Context, k *kqueue, done chan struct{}) {
+	stopWake := startCancellationWakeup(ctx, func() {
+		_, _ = unix.Write(k.wakeWrite, []byte{1})
+	})
 	// Closes all open descriptors and kqueue instance
 	defer func() {
+		stopWake()
+		w.lockPlatformShutdown()
+		defer w.opsMu.Unlock()
 		w.logDebug("kqueue platform shutting down")
 		k.mu.Lock()
 		for fd := range k.wds {
 			unix.Close(fd)
 		}
 		unix.Close(k.kqFd)
+		unix.Close(k.wakeRead)
+		unix.Close(k.wakeWrite)
 		k.wds = nil
 		k.paths = nil
 		k.dirs = nil
@@ -74,8 +103,6 @@ func (w *watcher) runKqueueLoop(ctx context.Context, k *kqueue, done chan struct
 
 	// Init event buffer and timeout
 	events := make([]unix.Kevent_t, w.bufferSize)
-	ts := unix.NsecToTimespec(w.cooldown.Nanoseconds())
-	timeout := &ts
 	backoff := newBackoffState()
 
 	for {
@@ -86,7 +113,7 @@ func (w *watcher) runKqueueLoop(ctx context.Context, k *kqueue, done chan struct
 		}
 
 		// Polling
-		n, err := unix.Kevent(k.kqFd, nil, events, timeout)
+		n, err := unix.Kevent(k.kqFd, nil, events, nil)
 		if err != nil {
 			// Interrupted signal
 			if err == unix.EINTR {
@@ -97,6 +124,9 @@ func (w *watcher) runKqueueLoop(ctx context.Context, k *kqueue, done chan struct
 				return
 			}
 			continue
+		}
+		if ctx.Err() != nil {
+			return
 		}
 
 		// Success, reset backoff
@@ -127,6 +157,9 @@ func (w *watcher) processKqueueEvents(k *kqueue, events []unix.Kevent_t) {
 		}
 
 		flags := event.Fflags
+		if flags&(unix.NOTE_DELETE|unix.NOTE_RENAME) != 0 {
+			w.hiddenAttributeCache.invalidateAll()
+		}
 		// Map kqueue events flags
 		var types []EventType
 		if flags&unix.NOTE_DELETE == unix.NOTE_DELETE {
@@ -137,11 +170,17 @@ func (w *watcher) processKqueueEvents(k *kqueue, events []unix.Kevent_t) {
 		}
 		if flags&unix.NOTE_ATTRIB == unix.NOTE_ATTRIB {
 			types = append(types, EventChmod)
+			if k.dirs[path] && w.shouldScanKqueueDirectory(path) {
+				dirsToScan[path] = struct{}{}
+			}
 		}
 		if flags&unix.NOTE_WRITE == unix.NOTE_WRITE || flags&unix.NOTE_EXTEND == unix.NOTE_EXTEND {
 			if k.dirs[path] {
-				// Directory changed, mark for scan
-				dirsToScan[path] = struct{}{}
+				// Top-level watches need direct-child descriptors so directory
+				// entries can be detected, but must not scan those child dirs.
+				if w.shouldScanKqueueDirectory(path) {
+					dirsToScan[path] = struct{}{}
+				}
 			} else {
 				types = append(types, EventMod)
 			}
@@ -158,10 +197,7 @@ func (w *watcher) processKqueueEvents(k *kqueue, events []unix.Kevent_t) {
 
 		// Clean up if removed
 		if flags&unix.NOTE_DELETE == unix.NOTE_DELETE || flags&unix.NOTE_RENAME == unix.NOTE_RENAME {
-			delete(k.wds, fd)
-			delete(k.paths, path)
-			delete(k.dirs, path)
-			unix.Close(fd)
+			removeKqueuePathLocked(k, path)
 		}
 	}
 
@@ -171,8 +207,24 @@ func (w *watcher) processKqueueEvents(k *kqueue, events []unix.Kevent_t) {
 	}
 }
 
+func (w *watcher) shouldScanKqueueDirectory(path string) bool {
+	watchPath := w.findMostSpecificWatchPath(path)
+	return watchPath == nil || watchPath.Depth != WatchTopLevel || filepath.Clean(path) == filepath.Clean(watchPath.Path)
+}
+
 // scanDirectoryLocked checks for new files in a watched dir
 func (w *watcher) scanDirectoryLocked(k *kqueue, dirPath string) {
+	w.hiddenAttributeCache.invalidateAll()
+	if !k.w.includeHidden {
+		watchRoot := dirPath
+		if parentWatch := k.w.findMostSpecificWatchPath(dirPath); parentWatch != nil {
+			watchRoot = parentWatch.Path
+		}
+		if w.isHiddenPathWithin(dirPath, watchRoot) {
+			return
+		}
+	}
+
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		return
@@ -185,6 +237,10 @@ func (w *watcher) scanDirectoryLocked(k *kqueue, dirPath string) {
 
 	for _, entry := range entries {
 		fullPath := filepath.Join(dirPath, entry.Name())
+		if !k.w.includeHidden && k.w.isHiddenPathWithin(fullPath, fullPath) {
+			k.addHiddenAttributeWatchLocked(fullPath)
+			continue
+		}
 		if _, exists := k.paths[fullPath]; !exists {
 			newEntries = append(newEntries, struct {
 				path  string
@@ -208,8 +264,66 @@ func (w *watcher) scanDirectoryLocked(k *kqueue, dirPath string) {
 					Time:  now,
 				})
 			}
+
+			// kqueue watches directories by descriptor and doesn't inherit a
+			// parent's watch for descendants. Populate a newly discovered tree
+			// explicitly so files already present in a moved-in directory are
+			// monitored immediately.
+			if watchPath := k.w.findMostSpecificWatchPath(dirPath); watchPath != nil && watchPath.Depth == WatchNested {
+				for _, entry := range newEntries {
+					if entry.isDir {
+						if _, watched := k.paths[entry.path]; watched {
+							if err := k.addWatchContentsLocked(entry.path); err != nil {
+								w.logWarn("Failed to add watches for new directory contents", "path", entry.path, "error", err)
+							}
+						}
+					}
+				}
+			}
 		} else {
 			w.logWarn("Failed to add watches for new entries", "error", err)
+		}
+	}
+}
+
+// addWatchContentsLocked registers descendants of a directory that is already
+// watched. The caller must hold k.mu.
+func (k *kqueue) addWatchContentsLocked(root string) error {
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if entry != nil && entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if path == root {
+			return nil
+		}
+		if !k.w.includeHidden && k.w.isHiddenPathWithin(path, path) {
+			k.addHiddenAttributeWatchLocked(path)
+			if entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if k.w.isIgnoredPattern(path) {
+			if entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		return k.addSingleWatchLocked(path)
+	})
+}
+
+func removeKqueuePathLocked(k *kqueue, path string) {
+	cleanPath := filepath.Clean(path)
+	for watchedPath, fd := range k.paths {
+		if watchedPath == cleanPath || isSubpath(cleanPath, watchedPath) {
+			delete(k.wds, fd)
+			delete(k.paths, watchedPath)
+			delete(k.dirs, watchedPath)
+			_ = unix.Close(fd)
 		}
 	}
 }
@@ -237,7 +351,7 @@ func (k *kqueue) batchAddWatchesLocked(entries []struct {
 			continue
 		}
 
-		if k.w.isIgnored(e.path) {
+		if k.w.isIgnoredPattern(e.path) {
 			continue
 		}
 
@@ -300,10 +414,38 @@ func (k *kqueue) addWatch(watchPath *WatchPath) error {
 
 	return filepath.WalkDir(watchPath.Path, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // Skip errors
+			if path == watchPath.Path {
+				return err
+			}
+			return nil
 		}
-		return k.addSingleWatchLocked(path)
+		if !k.w.includeHidden && k.w.isHiddenPathWithin(path, path) {
+			k.addHiddenAttributeWatchLocked(path)
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if err := k.addSingleWatchLocked(path); err != nil {
+			return err
+		}
+		if watchPath.Depth == WatchTopLevel && path != watchPath.Path && d.IsDir() {
+			return fs.SkipDir
+		}
+		return nil
 	})
+}
+
+// Keep a descriptor for a native hidden flag so NOTE_ATTRIB can reveal that
+// the entry became visible. Its children remain pruned while it is hidden.
+// Dot-prefixed names become visible through renames, which the parent detects.
+func (k *kqueue) addHiddenAttributeWatchLocked(path string) {
+	if strings.HasPrefix(filepath.Base(path), ".") || !isPlatformHiddenComponent(path) {
+		return
+	}
+	if err := k.addSingleWatchLocked(path); err != nil {
+		k.w.logWarn("Failed to watch hidden attributes", "path", path, "error", err)
+	}
 }
 
 // addSingleWatchLocked adds a file/dir
@@ -313,7 +455,7 @@ func (k *kqueue) addSingleWatchLocked(path string) error {
 	}
 
 	// Filter system files
-	if k.w.isIgnored(path) {
+	if k.w.isIgnoredPattern(path) {
 		return nil
 	}
 
@@ -360,22 +502,14 @@ func (k *kqueue) removeWatch(path string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
-	cleanPath := filepath.Clean(path)
-	var fdsToRemove []int
-
-	for p, fd := range k.paths {
-		if p == cleanPath || (len(p) > len(cleanPath) && p[len(cleanPath)] == filepath.Separator && p[:len(cleanPath)] == cleanPath) {
-			fdsToRemove = append(fdsToRemove, fd)
+	path = filepath.Clean(path)
+	for watched, fd := range k.paths {
+		if (watched == path || isSubpath(path, watched)) && !k.w.nativeWatchNeeded(watched, path, true) {
+			delete(k.wds, fd)
+			delete(k.paths, watched)
+			delete(k.dirs, watched)
+			_ = unix.Close(fd)
 		}
 	}
-
-	for _, fd := range fdsToRemove {
-		p := k.wds[fd]
-		delete(k.wds, fd)
-		delete(k.paths, p)
-		delete(k.dirs, p)
-		unix.Close(fd)
-	}
-
 	return nil
 }

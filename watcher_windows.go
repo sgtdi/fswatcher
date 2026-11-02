@@ -4,7 +4,9 @@ package fswatcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 	"unsafe"
@@ -78,20 +80,20 @@ func (w *watcher) startPlatform(ctx context.Context) (<-chan struct{}, error) {
 	w.streams["pathCounter"] = uintptr(1) // Start counter at 1
 	done := make(chan struct{})
 
-	// Waits for the context to be canceled
-	go func() {
-		<-ctx.Done()
-		windows.PostQueuedCompletionStatus(iocp, 0, 0, nil)
-	}()
-
-	go w.runWindowsLoop(iocp, done)
+	go w.runWindowsLoop(ctx, iocp, done)
 
 	return done, nil
 }
 
 // runWindowsLoop is the main event processing loop for Windows
-func (w *watcher) runWindowsLoop(iocp windows.Handle, done chan struct{}) {
+func (w *watcher) runWindowsLoop(ctx context.Context, iocp windows.Handle, done chan struct{}) {
+	stopWake := startCancellationWakeup(ctx, func() {
+		_ = windows.PostQueuedCompletionStatus(iocp, 0, 0, nil)
+	})
 	defer func() {
+		stopWake()
+		w.lockPlatformShutdown()
+		defer w.opsMu.Unlock()
 		w.logDebug("Windows platform shutting down")
 		w.streamMu.Lock()
 		if pathMap, ok := w.streams["pathMap"].(map[uintptr]*watchedPath); ok {
@@ -107,7 +109,6 @@ func (w *watcher) runWindowsLoop(iocp windows.Handle, done chan struct{}) {
 		close(done)
 	}()
 
-	backoff := newBackoffState()
 	for {
 		var bytesRead uint32
 		var key uintptr
@@ -120,51 +121,80 @@ func (w *watcher) runWindowsLoop(iocp windows.Handle, done chan struct{}) {
 			return
 		}
 
-		if err != nil {
-			// ERROR_OPERATION_ABORTED is expected if a handle is closed while a read is pending
-			if err == windows.ERROR_OPERATION_ABORTED {
-				continue
-			}
-
-			if !w.handleLoopError("windows", err, backoff) {
-				return
-			}
+		if err == windows.ERROR_OPERATION_ABORTED {
 			continue
 		}
-
-		// Success, reset backoff
-		w.resetBackoff(backoff)
-
 		w.streamMu.Lock()
 		pathMap := w.streams["pathMap"].(map[uintptr]*watchedPath)
-		wp, ok := pathMap[key]
-		w.streamMu.Unlock()
-
-		if !ok {
-			w.logWarn("Received completion for unknown key", "key", key)
+		wp, exists := pathMap[key]
+		if !exists {
+			w.streamMu.Unlock()
 			continue
 		}
-
-		if bytesRead > 0 {
-			w.handleWindowsEvents(wp, bytesRead)
-		} else {
-			// bytesRead == 0 with no error indicates a buffer overflow
-			w.logWarn("Windows buffer overflow detected", "path", wp.path)
-			w.handlePlatformEvent(WatchEvent{
-				Path:  wp.path,
-				Types: []EventType{EventOverflow},
-				Time:  time.Now(),
-			})
+		completionErr := w.handleWindowsCompletion(wp, bytesRead, err, w.readChanges)
+		w.streamMu.Unlock()
+		if completionErr != nil {
+			w.logError("Windows watch failed", "path", wp.path, "error", completionErr)
+			return
 		}
 
-		// Reissue the read request to continue watching.
-		if err := w.readChanges(wp); err != nil {
-			// Happen if the directory is deleted
-			if err != windows.ERROR_INVALID_HANDLE {
-				w.logError("Failed to reissue read", "path", wp.path, "error", err)
-			}
-		}
 	}
+}
+
+// handleWindowsCompletion rearms recoverable overflows and retires deleted roots.
+// Other failures stop the backend rather than leave a permanently silent root.
+// The caller must hold streamMu.
+func (w *watcher) handleWindowsCompletion(wp *watchedPath, n uint32, completionErr error, rearm func(*watchedPath) error) error {
+	if completionErr == windows.ERROR_OPERATION_ABORTED {
+		return nil
+	}
+	if completionErr != nil && completionErr != windows.ERROR_NOTIFY_ENUM_DIR && completionErr != windows.ERROR_MORE_DATA {
+		return w.handleWindowsReadError(wp, "readCompletion", completionErr)
+	}
+	if completionErr != nil || n == 0 {
+		w.handlePlatformEvent(WatchEvent{Path: wp.path, Types: []EventType{EventOverflow}, Time: time.Now()})
+	} else {
+		w.handleWindowsEvents(wp, n)
+	}
+	if err := rearm(wp); err != nil {
+		return w.handleWindowsReadError(wp, "rearm", err)
+	}
+	return nil
+}
+
+// Windows can report a deleted directory as ERROR_ACCESS_DENIED both in an
+// IOCP completion and when rearming its read. Confirm deletion so an actual
+// permission failure on an existing directory is still returned to the caller.
+func (w *watcher) handleWindowsReadError(wp *watchedPath, op string, err error) error {
+	if !wp.wasRemoved(err) {
+		return newError(op, wp.path, err)
+	}
+	if err := w.removeWindowsWatch(wp); err != nil {
+		return newError("removeDeletedWatch", wp.path, err)
+	}
+	w.handlePlatformEvent(WatchEvent{Path: wp.path, Types: []EventType{EventRemove}, Time: time.Now()})
+	return nil
+}
+
+func (wp *watchedPath) wasRemoved(err error) bool {
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) && !errors.Is(err, windows.ERROR_DELETE_PENDING) {
+		return false
+	}
+	// FILE_STANDARD_INFO identifies the original handle even if a new directory
+	// has already been created at the same path.
+	var info struct {
+		AllocationSize int64
+		EndOfFile      int64
+		NumberOfLinks  uint32
+		DeletePending  byte
+		Directory      byte
+	}
+	if windows.GetFileInformationByHandleEx(wp.handle, windows.FileStandardInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))) == nil && info.DeletePending != 0 {
+		return true
+	}
+	// Some filesystems do not support the handle query.
+	_, statErr := os.Stat(wp.path)
+	return errors.Is(statErr, os.ErrNotExist) || errors.Is(statErr, windows.ERROR_DELETE_PENDING)
 }
 
 // handleWindowsEvents parses the buffer from ReadDirectoryChangesW
@@ -233,7 +263,11 @@ func (w *watcher) addWatch(watchPath *WatchPath) error {
 	}
 
 	// Allocate a uint64 slice to ensure 8-byte alignment, then slice it as bytes
-	alignedBuf := make([]uint64, (w.readBufferSize+7)/8)
+	readSize := w.readBufferSize
+	if volume := filepath.VolumeName(path); len(volume) >= 2 && volume[:2] == `\\` && readSize > 64*1024 {
+		readSize = 64 * 1024
+	}
+	alignedBuf := make([]uint64, (readSize+7)/8)
 	wp := &watchedPath{
 		handle:    handle,
 		path:      path,
@@ -265,9 +299,19 @@ func (w *watcher) removeWatch(path string) error {
 
 	wpAny, exists := w.streams[path]
 	if !exists {
-		return fmt.Errorf("path %s is not being monitored", path)
+		// Windows can complete and release a directory handle after the
+		// directory is removed. DropPath still needs to clear its public entry.
+		return nil
 	}
 	wp := wpAny.(*watchedPath)
+	return w.removeWindowsWatch(wp)
+}
+
+// removeWindowsWatch releases one native registration. The configured root is
+// retained until DropPath, including when Windows first reports its deletion.
+// The caller must hold streamMu.
+func (w *watcher) removeWindowsWatch(wp *watchedPath) error {
+	path := wp.path
 	pathMap := w.streams["pathMap"].(map[uintptr]*watchedPath)
 
 	// Try to cancel any pending I/O operations

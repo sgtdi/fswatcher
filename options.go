@@ -19,6 +19,20 @@ func WithCooldown(d time.Duration) WatcherOpt {
 	}
 }
 
+// WithMaxWait caps the time events for one path can remain pending, even if
+// changes continue. Zero disables the cap. The default is at least one second
+// and never shorter than the configured cooldown.
+func WithMaxWait(d time.Duration) WatcherOpt {
+	return func(w *watcher) { w.maxWait = d; w.maxWaitSet = true }
+}
+
+// WithMaxPendingEvents bounds aggregation memory. At the limit, a pending
+// event is delivered early before accepting a new path. Channel backpressure
+// continues to use Dropped and EventsLost as usual.
+func WithMaxPendingEvents(limit int) WatcherOpt {
+	return func(w *watcher) { w.maxPending = limit }
+}
+
 // WithBufferSize sets the size of the main event channel
 func WithBufferSize(size int) WatcherOpt {
 	return func(w *watcher) {
@@ -45,6 +59,17 @@ func WithIncRegex(patterns ...string) WatcherOpt {
 func WithExcRegex(patterns ...string) WatcherOpt {
 	return func(w *watcher) {
 		w.excRegexPatterns = patterns
+	}
+}
+
+// WithHidden includes hidden files and directories in the events sent by the
+// watcher. By default, dot-prefixed paths are excluded on Unix-like platforms.
+// Windows paths with FILE_ATTRIBUTE_HIDDEN and macOS/FreeBSD paths with the
+// UF_HIDDEN flag are also excluded. System and temporary patterns from
+// [WithIgnoreList] remain active.
+func WithHidden() WatcherOpt {
+	return func(w *watcher) {
+		w.includeHidden = true
 	}
 }
 
@@ -88,15 +113,17 @@ func WithSeverity(level Severity) WatcherOpt {
 // Each key is a pattern as in [filepath.Match], matched against the base
 // name of each path, and any matching file is ignored. Modify the result
 // of [DefaultIgnores] to watch files that are ignored by default on
-// a platform, such as ".plist" files on macOS, or to ignore other files
-// An empty map ignores no files
+// a platform, such as ".plist" files on macOS, or to ignore other files.
+// To watch hidden files that also match a default pattern, delete that pattern
+// and use [WithHidden].
+// An empty map adds no system or temporary file patterns.
 //
 // Example: watch .plist files on macOS, and ignore *.orig files:
 //
 //	ignores := fswatcher.DefaultIgnores()
 //	delete(ignores, "*.plist")
 //	ignores["*.orig"] = struct{}{}
-//	w, err := fswatcher.New(fswatcher.WithIgnoreList(ignores))
+//	w, err := fswatcher.New(fswatcher.WithIgnoreList(ignores), fswatcher.WithHidden())
 func WithIgnoreList(ignores map[string]struct{}) WatcherOpt {
 	return func(w *watcher) {
 		if w.init != nil {
@@ -122,11 +149,13 @@ func WithPath(path string, options ...PathOption) WatcherOpt {
 		// Create a temporary WatchPath to apply options and get depth
 		tempWp := &WatchPath{Path: path, Depth: WatchNested}
 		for _, opt := range options {
-			opt(tempWp)
+			if opt != nil {
+				opt(tempWp)
+			}
 		}
 
 		// Validate the path using the new centralized function
-		wp, err := validateWatchPath(path, tempWp.Depth)
+		wp, err := validateWatchPath(tempWp.Path, tempWp.Depth)
 		if err != nil {
 			w.init = err
 			return
@@ -160,6 +189,7 @@ const (
 
 // WatchPath holds the configuration for a single watched path
 type WatchPath struct {
+	requestedPath    string
 	Path             string
 	Depth            WatchDepth
 	filter           PathFilter
@@ -245,41 +275,27 @@ func buildWatchPathFilter(wp *WatchPath) (PathFilter, error) {
 // validateWatchPath creates and validates a WatchPath struct
 func validateWatchPath(path string, depth WatchDepth) (*WatchPath, error) {
 	if path == "" {
-		return nil, newError("ValidateWatchPath", "", errors.New("path cannot be empty"))
+		return nil, newError("ValidateWatchPath", path, errors.New("path cannot be empty"))
 	}
-
-	var cleanPath string
-	info, err := os.Stat(path)
+	if depth != WatchNested && depth != WatchTopLevel {
+		return nil, newError("ValidateWatchPath", path, errors.New("invalid watch depth"))
+	}
+	abs, err := filepath.Abs(path)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, newError("ValidateWatchPath", path, fmt.Errorf("failed to stat path: %w", err))
-		}
-
-		// Path does not exist, try from working directory
-		cwd, getwdErr := os.Getwd()
-		if getwdErr != nil {
-			return nil, newError("ValidateWatchPath", "", fmt.Errorf("could not get working directory: %w", getwdErr))
-		}
-		cleanPath = filepath.Join(cwd, path)
-
-		info, err = os.Stat(cleanPath)
-		if err != nil {
-			return nil, newError("ValidateWatchPath", path, errors.New("path does not exist as provided or relative to working directory"))
-		}
-	} else {
-		cleanPath = path
+		return nil, newError("ValidateWatchPath", path, err)
 	}
-
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return nil, newError("ValidateWatchPath", path, err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return nil, newError("ValidateWatchPath", path, err)
+	}
 	if !info.IsDir() {
-		return nil, newError("ValidateWatchPath", cleanPath, errors.New("path is not a directory"))
+		return nil, newError("ValidateWatchPath", path, errors.New("path is not a directory"))
 	}
-
-	absPath, err := filepath.Abs(cleanPath)
-	if err != nil {
-		return nil, newError("ValidateWatchPath", cleanPath, fmt.Errorf("failed to get absolute path: %w", err))
-	}
-
-	return &WatchPath{Path: absPath, Depth: depth}, nil
+	return &WatchPath{Path: resolved, requestedPath: abs, Depth: depth}, nil
 }
 
 // PlatformLinux specifies which Linux backend to use

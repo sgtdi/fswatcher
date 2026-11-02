@@ -20,6 +20,13 @@ import (
 
 var tempDir string
 
+func canonicalTempDir(t testing.TB) string {
+	t.Helper()
+	path, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	return path
+}
+
 // mockWriter is a thread-safe io.Writer for capturing log messages
 type mockWriter struct {
 	mu       sync.Mutex
@@ -65,6 +72,20 @@ func TestMain(m *testing.M) {
 }
 
 func TestWatcher(t *testing.T) {
+	t.Run("PlatformStopsUnexpectedly", func(t *testing.T) {
+		platformDone := make(chan struct{})
+		close(platformDone)
+		require.ErrorContains(t, waitForWatchStop(context.Background(), platformDone), "stopped unexpectedly")
+	})
+
+	t.Run("PlatformStopsAfterCancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		platformDone := make(chan struct{})
+		close(platformDone)
+		require.NoError(t, waitForWatchStop(ctx, platformDone))
+	})
+
 	t.Run("InvalidBufferSizeReturnsError", func(t *testing.T) {
 		assert.NotPanics(t, func() {
 			w, err := New(WithPath(tempDir), WithBufferSize(0))
@@ -323,6 +344,39 @@ func TestWatcher(t *testing.T) {
 		assert.True(t, eventPaths[thirdFile], "Should have seen event for file in remaining path")
 	})
 
+	t.Run("DropDeletedPath", func(t *testing.T) {
+		root := t.TempDir()
+		child := filepath.Join(root, "child")
+		require.NoError(t, os.Mkdir(child, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(child, "file.txt"), []byte("data"), 0644))
+
+		ready := make(chan struct{})
+		w, err := New(WithPath(root), WithReadyChannel(ready), WithSeverity(SeverityNone))
+		require.NoError(t, err)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		watchErr := make(chan error, 1)
+		go func() { watchErr <- w.Watch(ctx) }()
+
+		select {
+		case <-ready:
+		case <-time.After(5 * time.Second):
+			t.Fatal("watcher did not become ready")
+		}
+
+		require.NoError(t, os.RemoveAll(root))
+		require.NoError(t, w.DropPath(root))
+		assert.Empty(t, w.Paths())
+
+		cancel()
+		select {
+		case err := <-watchErr:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("watcher did not stop")
+		}
+	})
+
 	t.Run("AddDropPathConcurrentOps", func(t *testing.T) {
 		baseDir := t.TempDir()
 		otherDir := t.TempDir()
@@ -531,8 +585,10 @@ func TestWatcher(t *testing.T) {
 
 		// Get absolute paths for assertion
 		absDir1, _ := filepath.Abs(".")
+		absDir1, _ = filepath.EvalSymlinks(absDir1)
 		absDir2, _ := filepath.Abs("../dir2")
-		absDir3, _ := filepath.Abs(dir3)
+		absDir2, _ = filepath.EvalSymlinks(absDir2)
+		absDir3, _ := filepath.EvalSymlinks(dir3)
 
 		// Test initial paths
 		w, err := New(WithPath("."), WithPath("../dir2"))

@@ -1,10 +1,13 @@
 package fswatcher
 
 import (
+	"container/heap"
 	"math/rand"
+	"path/filepath"
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -14,7 +17,7 @@ func TestIsSystemFile(t *testing.T) {
 		path     string
 		expected bool
 	}{
-		{"Normal file", "/path/document.docx", false},
+		{"Normal file", filepath.Join(tempDir, "path", "document.docx"), false},
 	}
 
 	if len(osPrefixes) > 0 {
@@ -25,7 +28,7 @@ func TestIsSystemFile(t *testing.T) {
 			name     string
 			path     string
 			expected bool
-		}{"Dynamic system file prefix", "/path/" + randomPrefix + "file", true})
+		}{"Dynamic system file prefix", filepath.Join(tempDir, "path", randomPrefix+"file"), true})
 	}
 
 	if len(osSuffixes) > 0 {
@@ -36,12 +39,12 @@ func TestIsSystemFile(t *testing.T) {
 			name     string
 			path     string
 			expected bool
-		}{"Dynamic system file suffix", "/path/file" + randomSuffix, true})
+		}{"Dynamic system file suffix", filepath.Join(tempDir, "path", "file"+randomSuffix), true})
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			actual := (&watcher{}).isIgnored(tc.path)
+			actual := watcherForHiddenPathTest(tempDir).isIgnored(tc.path)
 			if actual != tc.expected {
 				t.Errorf("isIgnored(%q) = %v; want %v", tc.path, actual, tc.expected)
 			}
@@ -50,13 +53,38 @@ func TestIsSystemFile(t *testing.T) {
 }
 
 func TestEventAggregator(t *testing.T) {
-	t.Run("MergeEvents", func(t *testing.T) {
+	// Timer assertions use virtual time so scheduler delays in CI cannot
+	// make a completed sleep race with the aggregation worker.
+	run := func(name string, test func(*testing.T)) {
+		t.Run(name, func(t *testing.T) { synctest.Test(t, test) })
+	}
+	run("CountsCoalescedEvents", func(t *testing.T) {
+		w := &watcher{events: make(chan WatchEvent, 1)}
+		ea := newEventAggregator(w, time.Hour)
+		t.Cleanup(ea.close)
+		ea.addEvent(WatchEvent{Path: "/test/coalesced.txt", Types: []EventType{EventCreate}})
+		ea.addEvent(WatchEvent{Path: "/test/coalesced.txt", Types: []EventType{EventMod}})
+		ea.addEvent(WatchEvent{Path: "/test/coalesced.txt", Types: []EventType{EventChmod}})
+
+		if got := w.Stats(); got.EventsCoalesced != 2 || got.EventsFiltered != 0 {
+			t.Fatalf("unexpected stats: coalesced=%d filtered=%d", got.EventsCoalesced, got.EventsFiltered)
+		}
+
+		ea.close()
+		event := <-w.events
+		if want := []EventType{EventCreate, EventMod, EventChmod}; !slices.Equal(event.Types, want) {
+			t.Fatalf("aggregated types = %v; want %v", event.Types, want)
+		}
+	})
+
+	run("MergeEvents", func(t *testing.T) {
 		events := make(chan WatchEvent, 10)
 		w := &watcher{
 			events: events,
 		}
 		cooldown := 50 * time.Millisecond
 		ea := newEventAggregator(w, cooldown)
+		t.Cleanup(ea.close)
 
 		path := "/test/file.txt"
 		now := time.Now()
@@ -77,6 +105,7 @@ func TestEventAggregator(t *testing.T) {
 
 		// Wait for more than cooldown
 		time.Sleep(cooldown * 2)
+		synctest.Wait()
 
 		select {
 		case ev := <-events:
@@ -96,13 +125,14 @@ func TestEventAggregator(t *testing.T) {
 		}
 	})
 
-	t.Run("IndependentPaths", func(t *testing.T) {
+	run("IndependentPaths", func(t *testing.T) {
 		events := make(chan WatchEvent, 10)
 		w := &watcher{
 			events: events,
 		}
 		cooldown := 50 * time.Millisecond
 		ea := newEventAggregator(w, cooldown)
+		t.Cleanup(ea.close)
 
 		path1 := "/test/file1.txt"
 		path2 := "/test/file2.txt"
@@ -111,19 +141,26 @@ func TestEventAggregator(t *testing.T) {
 		ea.addEvent(WatchEvent{Path: path2, Types: []EventType{EventCreate}})
 
 		time.Sleep(cooldown * 2)
+		synctest.Wait()
 
 		if len(events) != 2 {
-			t.Errorf("Expected 2 events in channel, got %d", len(events))
+			t.Fatalf("Expected 2 events in channel, got %d", len(events))
+		}
+		got := []string{(<-events).Path, (<-events).Path}
+		slices.Sort(got)
+		if want := []string{path1, path2}; !slices.Equal(got, want) {
+			t.Fatalf("independent paths = %v; want %v", got, want)
 		}
 	})
 
-	t.Run("CloseFlushes", func(t *testing.T) {
+	run("CloseFlushes", func(t *testing.T) {
 		events := make(chan WatchEvent, 10)
 		w := &watcher{
 			events: events,
 		}
 		cooldown := 1 * time.Second // Long cooldown
 		ea := newEventAggregator(w, cooldown)
+		t.Cleanup(ea.close)
 
 		path := "/test/file.txt"
 		ea.addEvent(WatchEvent{Path: path, Types: []EventType{EventCreate}})
@@ -141,11 +178,12 @@ func TestEventAggregator(t *testing.T) {
 		}
 	})
 
-	t.Run("TimerReset", func(t *testing.T) {
+	run("TimerReset", func(t *testing.T) {
 		events := make(chan WatchEvent, 10)
 		w := &watcher{events: events}
 		cooldown := 60 * time.Millisecond
 		ea := newEventAggregator(w, cooldown)
+		t.Cleanup(ea.close)
 
 		path := "/test/file.txt"
 
@@ -158,22 +196,24 @@ func TestEventAggregator(t *testing.T) {
 
 		// At t=70ms the original timer would have fired — channel must still be empty
 		time.Sleep(30 * time.Millisecond)
+		synctest.Wait()
 		if len(events) != 0 {
 			t.Fatal("event was flushed before the reset cooldown expired")
 		}
 
-		// At t=120ms the reset timer fires
+		// At t=130ms the reset timer has fired
 		time.Sleep(60 * time.Millisecond)
+		synctest.Wait()
 		if len(events) != 1 {
 			t.Fatalf("expected 1 merged event after reset cooldown, got %d", len(events))
 		}
 	})
 
-	t.Run("StaleGenerationDoesNotFlushUpdatedEvent", func(t *testing.T) {
+	run("StaleGenerationDoesNotFlushUpdatedEvent", func(t *testing.T) {
 		events := make(chan WatchEvent, 10)
 		w := &watcher{events: events}
 		ea := newEventAggregator(w, time.Hour)
-		defer ea.close()
+		t.Cleanup(ea.close)
 
 		path := "/test/file.txt"
 		ea.addEvent(WatchEvent{Path: path, Types: []EventType{EventCreate}})
@@ -200,11 +240,12 @@ func TestEventAggregator(t *testing.T) {
 		}
 	})
 
-	t.Run("EventIDTracking", func(t *testing.T) {
+	run("EventIDTracking", func(t *testing.T) {
 		events := make(chan WatchEvent, 10)
 		w := &watcher{events: events}
 		cooldown := 50 * time.Millisecond
 		ea := newEventAggregator(w, cooldown)
+		t.Cleanup(ea.close)
 
 		path := "/test/file.txt"
 		ea.addEvent(WatchEvent{ID: 5, Path: path, Types: []EventType{EventCreate}})
@@ -212,6 +253,7 @@ func TestEventAggregator(t *testing.T) {
 		ea.addEvent(WatchEvent{ID: 3, Path: path, Types: []EventType{EventChmod}})
 
 		time.Sleep(cooldown * 2)
+		synctest.Wait()
 
 		select {
 		case ev := <-events:
@@ -223,17 +265,19 @@ func TestEventAggregator(t *testing.T) {
 		}
 	})
 
-	t.Run("FlagsDeduplication", func(t *testing.T) {
+	run("FlagsDeduplication", func(t *testing.T) {
 		events := make(chan WatchEvent, 10)
 		w := &watcher{events: events}
 		cooldown := 50 * time.Millisecond
 		ea := newEventAggregator(w, cooldown)
+		t.Cleanup(ea.close)
 
 		path := "/test/file.txt"
 		ea.addEvent(WatchEvent{Path: path, Types: []EventType{EventCreate}, Flags: []string{"flag_a", "flag_b"}})
 		ea.addEvent(WatchEvent{Path: path, Types: []EventType{EventMod}, Flags: []string{"flag_b", "flag_c"}})
 
 		time.Sleep(cooldown * 2)
+		synctest.Wait()
 
 		select {
 		case ev := <-events:
@@ -245,11 +289,12 @@ func TestEventAggregator(t *testing.T) {
 		}
 	})
 
-	t.Run("DeterministicOrdering", func(t *testing.T) {
+	run("DeterministicOrdering", func(t *testing.T) {
 		events := make(chan WatchEvent, 10)
 		w := &watcher{events: events}
 		cooldown := 50 * time.Millisecond
 		ea := newEventAggregator(w, cooldown)
+		t.Cleanup(ea.close)
 
 		path := "/test/file.txt"
 		ea.addEvent(WatchEvent{
@@ -264,6 +309,7 @@ func TestEventAggregator(t *testing.T) {
 		})
 
 		time.Sleep(cooldown * 2)
+		synctest.Wait()
 
 		select {
 		case ev := <-events:
@@ -291,11 +337,12 @@ func TestEventAggregator(t *testing.T) {
 		}
 	})
 
-	t.Run("ClosedGuard", func(t *testing.T) {
+	run("ClosedGuard", func(t *testing.T) {
 		events := make(chan WatchEvent, 10)
 		w := &watcher{events: events}
 		cooldown := 50 * time.Millisecond
 		ea := newEventAggregator(w, cooldown)
+		t.Cleanup(ea.close)
 
 		ea.close()
 
@@ -303,17 +350,19 @@ func TestEventAggregator(t *testing.T) {
 		ea.addEvent(WatchEvent{Path: "/test/file.txt", Types: []EventType{EventCreate}})
 
 		time.Sleep(cooldown * 2)
+		synctest.Wait()
 
 		if len(events) != 0 {
 			t.Errorf("expected 0 events after close, got %d", len(events))
 		}
 	})
 
-	t.Run("ConcurrentSafety", func(t *testing.T) {
+	run("ConcurrentSafety", func(t *testing.T) {
 		events := make(chan WatchEvent, 1000)
 		w := &watcher{events: events}
 		cooldown := 50 * time.Millisecond
 		ea := newEventAggregator(w, cooldown)
+		t.Cleanup(ea.close)
 
 		paths := []string{"/test/a.txt", "/test/b.txt", "/test/c.txt"}
 		const goroutines = 10
@@ -338,23 +387,26 @@ func TestEventAggregator(t *testing.T) {
 		wg.Wait()
 
 		time.Sleep(cooldown * 3)
+		synctest.Wait()
 
 		if len(events) == 0 {
 			t.Error("expected at least one event from concurrent adds")
 		}
 	})
 
-	t.Run("OverflowEventType", func(t *testing.T) {
+	run("OverflowEventType", func(t *testing.T) {
 		events := make(chan WatchEvent, 10)
 		w := &watcher{events: events}
 		cooldown := 50 * time.Millisecond
 		ea := newEventAggregator(w, cooldown)
+		t.Cleanup(ea.close)
 
 		path := "/test/file.txt"
 		ea.addEvent(WatchEvent{Path: path, Types: []EventType{EventCreate}})
 		ea.addEvent(WatchEvent{Path: path, Types: []EventType{EventOverflow}})
 
 		time.Sleep(cooldown * 2)
+		synctest.Wait()
 
 		select {
 		case ev := <-events:
@@ -363,6 +415,56 @@ func TestEventAggregator(t *testing.T) {
 			}
 		case <-time.After(100 * time.Millisecond):
 			t.Fatal("timeout waiting for aggregated event")
+		}
+	})
+
+	run("UnexpectedEventTypesRemainSorted", func(t *testing.T) {
+		events := make(chan WatchEvent, 1)
+		ea := newEventAggregator(&watcher{events: events}, time.Hour)
+		t.Cleanup(ea.close)
+		ea.addEvent(WatchEvent{
+			Path:  "/test/file.txt",
+			Types: []EventType{EventType(99), EventCreate, EventType(42), EventCreate},
+		})
+		ea.close()
+
+		got := <-events
+		want := []EventType{EventCreate, EventType(42), EventType(99)}
+		if !slices.Equal(got.Types, want) {
+			t.Fatalf("unexpected event type ordering: got %v, want %v", got.Types, want)
+		}
+	})
+
+	run("DeadlineHeapTracksUpdatedEvents", func(t *testing.T) {
+		ea := newEventAggregator(&watcher{events: make(chan WatchEvent, 3)}, time.Hour)
+		t.Cleanup(ea.close)
+
+		for _, path := range []string{"/test/a", "/test/b", "/test/c"} {
+			ea.addEvent(WatchEvent{Path: path, Types: []EventType{EventCreate}})
+		}
+
+		// Force distinct deadlines to make heap ordering deterministic.
+		ea.mu.Lock()
+		ea.events["/test/a"].deadline = time.Now().Add(3 * time.Second)
+		ea.events["/test/b"].deadline = time.Now().Add(time.Second)
+		ea.events["/test/c"].deadline = time.Now().Add(2 * time.Second)
+		for _, event := range ea.events {
+			heap.Fix(&ea.deadlines, event.heapIndex)
+		}
+		want := ea.events["/test/b"].deadline
+		ea.mu.Unlock()
+
+		if got, ok := ea.nextDeadline(); !ok || !got.Equal(want) {
+			t.Fatalf("nextDeadline() = %v, %v; want %v, true", got, ok, want)
+		}
+
+		// Updating the current root must move it to its new position.
+		ea.addEvent(WatchEvent{Path: "/test/b", Types: []EventType{EventMod}})
+		ea.mu.Lock()
+		want = ea.events["/test/c"].deadline
+		ea.mu.Unlock()
+		if got, ok := ea.nextDeadline(); !ok || !got.Equal(want) {
+			t.Fatalf("nextDeadline() after update = %v, %v; want %v, true", got, ok, want)
 		}
 	})
 }

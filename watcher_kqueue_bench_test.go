@@ -1,4 +1,4 @@
-//go:build darwin && !cgo
+//go:build (darwin && !cgo) || freebsd || openbsd || netbsd || dragonfly
 
 package fswatcher
 
@@ -33,7 +33,7 @@ func BenchmarkKqueueAddWatch(b *testing.B) {
 		filesPerDir = 50
 	)
 
-	root := b.TempDir()
+	root := canonicalTempDir(b)
 	createKqueueBenchmarkTree(b, root, dirs, filesPerDir)
 
 	wIface, err := New()
@@ -58,6 +58,8 @@ func BenchmarkKqueueAddWatch(b *testing.B) {
 			_ = unix.Close(fd)
 		}
 		_ = unix.Close(k.kqFd)
+		_ = unix.Close(k.wakeRead)
+		_ = unix.Close(k.wakeWrite)
 		k.wds = nil
 		k.paths = nil
 		k.dirs = nil

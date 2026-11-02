@@ -74,6 +74,23 @@ jobs:
                     fi
                   fi
 
+            - name: "Verify v1 and v2 module coexistence"
+              working-directory: integration/compat
+              shell: bash
+              run: |
+                  if [[ "$RUNNER_OS" == "Windows" ]]; then
+                    go test -count=1 ./...
+                  else
+                    go test -race -count=1 ./...
+                  fi
+
+            - name: "Run privileged fanotify integration"
+              if: runner.os == 'Linux'
+              shell: bash
+              run: |
+                  go test -c -o "$RUNNER_TEMP/fanotify.test" .
+                  sudo env FSWATCHER_REQUIRE_FANOTIFY=1 "$RUNNER_TEMP/fanotify.test" -test.run '^TestFanotify_Backend$' -test.v -test.timeout=30s
+
             - name: "Verify BSD Compilation"
               if: runner.os == 'Linux' # Run verification on Linux runner
               run: |
@@ -94,6 +111,23 @@ jobs:
                   GOOS=netbsd GOARCH=arm go build ./...
                   echo "Verifying build for DragonFly BSD..."
                   GOOS=dragonfly go build ./...
+
+                  echo "Verifying BSD test compilation..."
+                  while read -r target_os target_arch; do
+                    echo "Compiling tests for ${target_os}/${target_arch}..."
+                    GOOS="$target_os" GOARCH="$target_arch" CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/fswatcher-${target_os}-${target_arch}.test" .
+                  done <<'EOF'
+                  freebsd amd64
+                  freebsd 386
+                  freebsd arm
+                  openbsd amd64
+                  openbsd 386
+                  openbsd arm
+                  netbsd amd64
+                  netbsd 386
+                  netbsd arm
+                  dragonfly amd64
+                  EOF
 
             - name: "Upload coverage report"
               uses: actions/upload-artifact@v7

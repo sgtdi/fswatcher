@@ -4,6 +4,7 @@ package fswatcher
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,74 +19,149 @@ import (
 // TestFanotify_Backend tests the fanotify backend initialization
 func TestFanotify_Backend(t *testing.T) {
 	if os.Getuid() != 0 {
-		t.Skip("Skipping fanotify test: requires root (CAP_SYS_ADMIN)")
+		t.Skip("requires CAP_SYS_ADMIN and CAP_DAC_READ_SEARCH")
 	}
-	// Fanotify requires CAP_SYS_ADMIN
-	tempDir, err := os.MkdirTemp(".", "fanotify_test_")
+	root := canonicalTempDir(t)
+	for _, dir := range []string{"a/nested", "b"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0700))
+	}
+	ready := make(chan struct{})
+	wi, err := New(WithPath(root), WithLinuxPlatform(PlatformFanotify), WithReadyChannel(ready), WithCooldown(time.Millisecond), WithSeverity(SeverityDebug), WithLogFile("stdout"))
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
-	readyChan := make(chan struct{})
-	w, err := New(
-		WithPath(tempDir),
-		WithLinuxPlatform(PlatformFanotify),
-		WithReadyChannel(readyChan),
-		WithCooldown(10*time.Millisecond),
-		WithSeverity(SeverityDebug),
-		WithLogFile("stdout"),
-	)
-	require.NoError(t, err)
-
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() {
-		_ = w.Watch(ctx)
-	}()
-
+	stopped := make(chan struct{})
+	var watchErr error
+	go func() { watchErr = wi.Watch(ctx); close(stopped) }()
+	defer func() { cancel(); <-stopped }()
 	select {
-	case <-readyChan:
+	case <-ready:
+	case <-stopped:
+		if os.Getenv("FSWATCHER_REQUIRE_FANOTIFY") != "1" && (errors.Is(watchErr, unix.EPERM) || errors.Is(watchErr, unix.EOPNOTSUPP) || errors.Is(watchErr, unix.ENOSYS)) {
+			t.Skipf("fanotify unavailable: %v", watchErr)
+		}
+		require.NoError(t, watchErr)
+		t.Fatal("watcher stopped before ready")
 	case <-time.After(5 * time.Second):
-		t.Fatal("Watcher failed to start")
+		t.Fatal("fanotify did not become ready")
 	}
-
-	wImpl := w.(*watcher)
-	wImpl.streamMu.Lock()
-	platform := wImpl.streams["platform"]
-	wImpl.streamMu.Unlock()
-	assert.IsType(t, &fanotify{}, platform, "Should be using fanotify backend")
-
-	var events []WatchEvent
-	var mu sync.Mutex
-	done := make(chan struct{})
-
-	go func() {
-		for event := range w.Events() {
-			mu.Lock()
-			events = append(events, event)
-			mu.Unlock()
+	for _, name := range []string{"a/nested/one.txt", "b/two.txt"} {
+		file := filepath.Join(root, name)
+		require.NoError(t, os.WriteFile(file, []byte("data"), 0600))
+		timeout := time.NewTimer(3 * time.Second)
+	found:
+		for {
+			select {
+			case event := <-wi.Events():
+				if event.Path == file {
+					break found
+				}
+			case <-timeout.C:
+				t.Fatalf("no fanotify event for %s", file)
+			}
 		}
-		close(done)
-	}()
-
-	testFile := filepath.Join(tempDir, "test_fanotify.txt")
-	err = os.WriteFile(testFile, []byte("data"), 0644)
-	require.NoError(t, err)
-
-	time.Sleep(200 * time.Millisecond)
+		timeout.Stop()
+	}
 	cancel()
-	<-done
+	<-stopped
+	require.NoError(t, watchErr)
+}
 
-	mu.Lock()
-	defer mu.Unlock()
+func TestFanotifyRecursiveMarksAndDynamicDirectories(t *testing.T) {
+	root := t.TempDir()
+	existing := filepath.Join(root, "existing", "nested")
+	require.NoError(t, os.MkdirAll(existing, 0o700))
 
-	found := false
-	for _, e := range events {
-		if e.Path == testFile {
-			found = true
-			break
-		}
+	w, err := New(WithPath(root), WithSeverity(SeverityNone))
+	require.NoError(t, err)
+	wImpl := w.(*watcher)
+	marked := make(map[string]int)
+	markCalls := make(map[string]int)
+	p := &fanotify{
+		fd:         -1,
+		paths:      make(map[string]struct{}),
+		roots:      make(map[string]*fanotifyRoot),
+		markRefs:   make(map[string]int),
+		mountCache: make(map[uint64]string),
+		markFn: func(path string, add bool) error {
+			if add {
+				marked[path]++
+				markCalls["+"+path]++
+			} else {
+				marked[path]--
+				markCalls["-"+path]++
+				if marked[path] == 0 {
+					delete(marked, path)
+				}
+			}
+			return nil
+		},
 	}
-	assert.True(t, found, "Should have received an event for the file using fanotify")
+	t.Cleanup(func() { wImpl.aggregator.close() })
+
+	wp, err := validateWatchPath(root, WatchNested)
+	require.NoError(t, err)
+	require.NoError(t, p.addWatch(wImpl, wp))
+	for _, path := range []string{root, filepath.Join(root, "existing"), existing} {
+		assert.Equal(t, 1, marked[path], "existing directory should have a fanotify mark")
+	}
+
+	created := filepath.Join(root, "created")
+	createdChild := filepath.Join(created, "child")
+	require.NoError(t, os.MkdirAll(createdChild, 0o700))
+	wImpl.dispatchFanotifyEvent(p, created, unix.FAN_CREATE|unix.FAN_ONDIR)
+	assert.Equal(t, 1, marked[created], "new directory should be marked")
+	assert.Equal(t, 1, marked[createdChild], "existing descendants should be marked")
+
+	require.NoError(t, os.RemoveAll(created))
+	wImpl.dispatchFanotifyEvent(p, created, unix.FAN_DELETE|unix.FAN_ONDIR)
+	assert.NotContains(t, marked, created)
+	assert.NotContains(t, marked, createdChild)
+	assert.Equal(t, 1, markCalls["-"+created])
+	assert.Equal(t, 1, markCalls["-"+createdChild])
+
+	hidden := filepath.Join(root, ".hidden")
+	require.NoError(t, os.Mkdir(hidden, 0o700))
+	wImpl.dispatchFanotifyEvent(p, hidden, unix.FAN_CREATE|unix.FAN_ONDIR)
+	assert.NotContains(t, marked, hidden, "hidden directories should stay unmarked by default")
+}
+
+func TestFanotifyOverflowEmitsEventAndReconcilesMarks(t *testing.T) {
+	root := t.TempDir()
+	w, err := New(WithPath(root), WithCooldown(time.Millisecond), WithSeverity(SeverityNone))
+	require.NoError(t, err)
+	wImpl := w.(*watcher)
+	marked := make(map[string]bool)
+	p := &fanotify{
+		fd:         -1,
+		paths:      make(map[string]struct{}),
+		roots:      make(map[string]*fanotifyRoot),
+		markRefs:   make(map[string]int),
+		mountCache: make(map[uint64]string),
+		markFn: func(path string, add bool) error {
+			if add {
+				marked[path] = true
+			} else {
+				delete(marked, path)
+			}
+			return nil
+		},
+	}
+	t.Cleanup(func() { wImpl.aggregator.close() })
+
+	wp, err := validateWatchPath(root, WatchNested)
+	require.NoError(t, err)
+	require.NoError(t, p.addWatch(wImpl, wp))
+	missed := filepath.Join(root, "created-before-overflow")
+	require.NoError(t, os.Mkdir(missed, 0o700))
+
+	wImpl.dispatchFanotifyEvent(p, "", unix.FAN_Q_OVERFLOW)
+	assert.True(t, marked[missed], "overflow reconciliation should restore marks for new directories")
+	select {
+	case event := <-w.Events():
+		assert.Contains(t, event.Types, EventOverflow)
+	case <-time.After(time.Second):
+		t.Fatal("expected an overflow event")
+	}
 }
 
 // TestInotify_Backend tests the inotify backend initialization
@@ -175,4 +251,86 @@ func TestInotify_RemoveWatchCleansState(t *testing.T) {
 
 	// Re-adding the same path must succeed after removal
 	require.NoError(t, p.addWatch(wImpl, wp))
+}
+
+func TestInotifyAddWatchSkipsHiddenDirectoriesByDefault(t *testing.T) {
+	root := t.TempDir()
+	hiddenNested := filepath.Join(root, ".hidden", "nested")
+	visibleNested := filepath.Join(root, "visible", "nested")
+	require.NoError(t, os.MkdirAll(hiddenNested, 0o700))
+	require.NoError(t, os.MkdirAll(visibleNested, 0o700))
+
+	for _, tc := range []struct {
+		name          string
+		includeHidden bool
+		wantHidden    bool
+	}{
+		{name: "hidden excluded by default"},
+		{name: "WithHidden includes hidden", includeHidden: true, wantHidden: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			options := []WatcherOpt{}
+			if tc.includeHidden {
+				options = append(options, WithHidden())
+			}
+			w, err := New(options...)
+			require.NoError(t, err)
+
+			p, err := newInotify()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = unix.Close(p.fd) })
+
+			wp, err := validateWatchPath(root, WatchNested)
+			require.NoError(t, err)
+			require.NoError(t, p.addWatch(w.(*watcher), wp))
+
+			isWatched := func(path string) bool {
+				p.mu.RLock()
+				defer p.mu.RUnlock()
+				for _, watched := range p.wds {
+					if watched.Path == path {
+						return true
+					}
+				}
+				return false
+			}
+
+			assert.True(t, isWatched(visibleNested), "visible nested directory should be watched")
+			assert.Equal(t, tc.wantHidden, isWatched(hiddenNested), "hidden nested directory registration")
+		})
+	}
+}
+
+func TestInotifyHiddenWatchRootCanBeDropped(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".hidden-root")
+	nested := filepath.Join(root, "nested")
+	require.NoError(t, os.MkdirAll(nested, 0o700))
+
+	w, err := New(WithPath(root))
+	require.NoError(t, err)
+	wImpl := w.(*watcher)
+	p, err := newInotify()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = unix.Close(p.fd) })
+	wImpl.streams = map[string]any{"platform": p}
+
+	wp, err := validateWatchPath(root, WatchNested)
+	require.NoError(t, err)
+	require.NoError(t, p.addWatch(wImpl, wp))
+
+	p.mu.RLock()
+	rootWatched := false
+	nestedWatched := false
+	for _, watched := range p.wds {
+		rootWatched = rootWatched || watched.Path == root
+		nestedWatched = nestedWatched || watched.Path == nested
+	}
+	p.mu.RUnlock()
+	assert.True(t, rootWatched, "the explicit hidden root remains removable")
+	assert.False(t, nestedWatched, "hidden roots are not recursively scanned")
+
+	require.NoError(t, wImpl.removeWatch(root))
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	assert.Empty(t, p.wds, "dropping the hidden root removes its watch")
 }

@@ -1,4 +1,4 @@
-//go:build darwin && !cgo
+//go:build (darwin && !cgo) || freebsd || openbsd || netbsd || dragonfly
 
 package fswatcher
 
@@ -17,7 +17,7 @@ import (
 
 // TestKqueue_Backend tests the kqueue backend initialization
 func TestKqueue_Backend(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := canonicalTempDir(t)
 
 	readyChan := make(chan struct{})
 	w, err := New(
@@ -95,7 +95,7 @@ func TestNewKqueue(t *testing.T) {
 	assert.NotNil(t, k.dirs)
 
 	// Cleanup
-	unix.Close(k.kqFd)
+	closeKqueueForTest(k)
 }
 
 func TestStartPlatform(t *testing.T) {
@@ -160,18 +160,18 @@ func TestRunKqueueLoop(t *testing.T) {
 
 func TestProcessKqueueEvents(t *testing.T) {
 	// Create a temp file
-	tmpFile, err := os.CreateTemp("", "test_event_*.txt")
+	tmpFile, err := os.CreateTemp(tempDir, "test_event_*.txt")
 	require.NoError(t, err)
 	defer os.Remove(tmpFile.Name())
 	tmpFile.Close()
 
-	w, err := New()
+	w, err := New(WithPath(filepath.Dir(tmpFile.Name())))
 	require.NoError(t, err)
 	wImpl := w.(*watcher)
 
 	k, err := newKqueue(wImpl)
 	require.NoError(t, err)
-	defer unix.Close(k.kqFd)
+	defer closeKqueueForTest(k)
 
 	// Manually add watch to populate maps
 	k.mu.Lock()
@@ -186,7 +186,7 @@ func TestProcessKqueueEvents(t *testing.T) {
 	// Construct a fake event
 	events := []unix.Kevent_t{
 		{
-			Ident:  uint64(fd),
+			Ident:  kqueueIdent(fd),
 			Fflags: unix.NOTE_WRITE,
 		},
 	}
@@ -211,7 +211,7 @@ func TestProcessKqueueEvents(t *testing.T) {
 }
 
 func TestScanDirectoryLocked(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "test_scan_dir_*")
+	tmpDir, err := os.MkdirTemp(tempDir, "test_scan_dir_*")
 	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
 
@@ -219,13 +219,13 @@ func TestScanDirectoryLocked(t *testing.T) {
 	err = os.WriteFile(file1, []byte("content"), 0644)
 	require.NoError(t, err)
 
-	w, err := New()
+	w, err := New(WithPath(tmpDir))
 	require.NoError(t, err)
 	wImpl := w.(*watcher)
 
 	k, err := newKqueue(wImpl)
 	require.NoError(t, err)
-	defer unix.Close(k.kqFd)
+	defer closeKqueueForTest(k)
 
 	// Add the directory itself first (usually how it works)
 	k.mu.Lock()
@@ -255,7 +255,7 @@ func TestScanDirectoryLocked(t *testing.T) {
 }
 
 func TestAddWatch(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "test_add_watch_*")
+	tmpDir, err := os.MkdirTemp(tempDir, "test_add_watch_*")
 	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
 
@@ -277,7 +277,7 @@ func TestAddWatch(t *testing.T) {
 
 	k, err := newKqueue(wImpl)
 	require.NoError(t, err)
-	defer unix.Close(k.kqFd)
+	defer closeKqueueForTest(k)
 
 	wp := &WatchPath{Path: tmpDir}
 	err = k.addWatch(wp)
@@ -294,8 +294,227 @@ func TestAddWatch(t *testing.T) {
 	assert.True(t, k.dirs[subDir])
 }
 
+func TestKqueueWatchesMovedInDirectoryTreeAndRemovesRenamedTree(t *testing.T) {
+	root := canonicalTempDir(t)
+	outside := canonicalTempDir(t)
+	movedSource := filepath.Join(outside, "populated")
+	nested := filepath.Join(movedSource, "nested")
+	require.NoError(t, os.MkdirAll(nested, 0o700))
+	file := filepath.Join(nested, "existing.txt")
+	require.NoError(t, os.WriteFile(file, []byte("data"), 0o600))
+
+	w, err := New(WithPath(root), WithSeverity(SeverityNone))
+	require.NoError(t, err)
+	wImpl := w.(*watcher)
+	k, err := newKqueue(wImpl)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		wImpl.aggregator.close()
+		closeKqueueForTest(k)
+	})
+
+	wp, err := validateWatchPath(root, WatchNested)
+	require.NoError(t, err)
+	require.NoError(t, k.addWatch(wp))
+
+	movedPath := filepath.Join(root, "populated")
+	require.NoError(t, os.Rename(movedSource, movedPath))
+	k.mu.Lock()
+	wImpl.scanDirectoryLocked(k, root)
+	_, hasMovedDir := k.paths[movedPath]
+	_, hasNestedDir := k.paths[filepath.Join(movedPath, "nested")]
+	_, hasExistingFile := k.paths[filepath.Join(movedPath, "nested", "existing.txt")]
+	k.mu.Unlock()
+	assert.True(t, hasMovedDir, "moved directory should be watched")
+	assert.True(t, hasNestedDir, "existing nested directory should be watched")
+	assert.True(t, hasExistingFile, "existing file should be watched")
+
+	movedOut := filepath.Join(outside, "moved-out")
+	require.NoError(t, os.Rename(movedPath, movedOut))
+	k.mu.Lock()
+	fd := k.paths[movedPath]
+	k.mu.Unlock()
+	require.NotZero(t, fd)
+	wImpl.processKqueueEvents(k, []unix.Kevent_t{{Ident: kqueueIdent(fd), Fflags: unix.NOTE_RENAME}})
+
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	assert.NotContains(t, k.paths, movedPath)
+	assert.NotContains(t, k.paths, filepath.Join(movedPath, "nested"))
+	assert.NotContains(t, k.paths, filepath.Join(movedPath, "nested", "existing.txt"))
+}
+
+func TestKqueueTopLevelWatchesOnlyDirectChildren(t *testing.T) {
+	root := canonicalTempDir(t)
+	nested := filepath.Join(root, "child", "nested")
+	require.NoError(t, os.MkdirAll(nested, 0o700))
+	rootFile := filepath.Join(root, "root.txt")
+	nestedFile := filepath.Join(nested, "nested.txt")
+	require.NoError(t, os.WriteFile(rootFile, []byte("root"), 0o600))
+	require.NoError(t, os.WriteFile(nestedFile, []byte("nested"), 0o600))
+
+	w, err := New(WithPath(root, WithDepth(WatchTopLevel)), WithSeverity(SeverityNone))
+	require.NoError(t, err)
+	wImpl := w.(*watcher)
+	k, err := newKqueue(wImpl)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		wImpl.aggregator.close()
+		closeKqueueForTest(k)
+	})
+
+	wp, err := validateWatchPath(root, WatchTopLevel)
+	require.NoError(t, err)
+	require.NoError(t, k.addWatch(wp))
+
+	k.mu.Lock()
+	assert.Contains(t, k.paths, root)
+	assert.Contains(t, k.paths, filepath.Join(root, "child"))
+	assert.Contains(t, k.paths, rootFile)
+	assert.NotContains(t, k.paths, nested)
+	assert.NotContains(t, k.paths, nestedFile)
+	k.mu.Unlock()
+
+	newChild := filepath.Join(root, "new-child")
+	newNested := filepath.Join(newChild, "nested")
+	newNestedFile := filepath.Join(newNested, "file.txt")
+	require.NoError(t, os.MkdirAll(newNested, 0o700))
+	require.NoError(t, os.WriteFile(newNestedFile, []byte("nested"), 0o600))
+	k.mu.Lock()
+	wImpl.scanDirectoryLocked(k, root)
+	childFD, childWatched := k.paths[newChild]
+	_, nestedWatched := k.paths[newNested]
+	k.mu.Unlock()
+	assert.True(t, childWatched, "new direct child directory should be watched")
+	assert.False(t, nestedWatched, "new descendants should not be watched")
+
+	wImpl.processKqueueEvents(k, []unix.Kevent_t{{Ident: kqueueIdent(childFD), Fflags: unix.NOTE_WRITE}})
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	assert.NotContains(t, k.paths, newNested)
+	assert.NotContains(t, k.paths, newNestedFile)
+}
+
+func TestKqueueAddWatchHiddenPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		includeHidden bool
+		wantHidden    bool
+	}{
+		{name: "hidden paths excluded by default"},
+		{name: "WithHidden includes hidden paths", includeHidden: true, wantHidden: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := canonicalTempDir(t)
+			hiddenDir := filepath.Join(root, ".hidden")
+			hiddenFile := filepath.Join(root, ".secret")
+			visibleDir := filepath.Join(root, "visible")
+			visibleFile := filepath.Join(root, "public")
+			require.NoError(t, os.MkdirAll(filepath.Join(hiddenDir, "nested"), 0o700))
+			require.NoError(t, os.Mkdir(visibleDir, 0o700))
+			require.NoError(t, os.WriteFile(hiddenFile, []byte("hidden"), 0o600))
+			require.NoError(t, os.WriteFile(visibleFile, []byte("visible"), 0o600))
+
+			options := []WatcherOpt{WithPath(root)}
+			if tc.includeHidden {
+				options = append(options, WithHidden())
+			}
+			w, err := New(options...)
+			require.NoError(t, err)
+			wImpl := w.(*watcher)
+			k, err := newKqueue(wImpl)
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				wImpl.aggregator.close()
+				closeKqueueForTest(k)
+			})
+
+			wp, err := validateWatchPath(root, WatchNested)
+			require.NoError(t, err)
+			require.NoError(t, k.addWatch(wp))
+
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			assert.Contains(t, k.paths, root)
+			assert.Contains(t, k.paths, visibleDir)
+			assert.Contains(t, k.paths, visibleFile)
+			assert.Equal(t, tc.wantHidden, hasKqueuePath(k, hiddenDir))
+			assert.Equal(t, tc.wantHidden, hasKqueuePath(k, filepath.Join(hiddenDir, "nested")))
+			assert.Equal(t, tc.wantHidden, hasKqueuePath(k, hiddenFile))
+		})
+	}
+}
+
+func TestKqueueScanDirectorySkipsHiddenPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		includeHidden bool
+		wantHidden    bool
+	}{
+		{name: "hidden paths excluded by default"},
+		{name: "WithHidden includes hidden paths", includeHidden: true, wantHidden: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := canonicalTempDir(t)
+			options := []WatcherOpt{WithPath(root)}
+			if tc.includeHidden {
+				options = append(options, WithHidden())
+			}
+			w, err := New(options...)
+			require.NoError(t, err)
+			wImpl := w.(*watcher)
+			k, err := newKqueue(wImpl)
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				wImpl.aggregator.close()
+				closeKqueueForTest(k)
+			})
+
+			wp, err := validateWatchPath(root, WatchNested)
+			require.NoError(t, err)
+			require.NoError(t, k.addWatch(wp))
+
+			hiddenDir := filepath.Join(root, ".hidden")
+			hiddenFile := filepath.Join(root, ".secret")
+			visibleDir := filepath.Join(root, "visible")
+			visibleFile := filepath.Join(root, "public")
+			require.NoError(t, os.Mkdir(hiddenDir, 0o700))
+			require.NoError(t, os.Mkdir(visibleDir, 0o700))
+			require.NoError(t, os.WriteFile(hiddenFile, []byte("hidden"), 0o600))
+			require.NoError(t, os.WriteFile(visibleFile, []byte("visible"), 0o600))
+
+			k.mu.Lock()
+			wImpl.scanDirectoryLocked(k, root)
+			k.mu.Unlock()
+
+			k.mu.Lock()
+			assert.Contains(t, k.paths, visibleDir)
+			assert.Contains(t, k.paths, visibleFile)
+			assert.Equal(t, tc.wantHidden, hasKqueuePath(k, hiddenDir))
+			assert.Equal(t, tc.wantHidden, hasKqueuePath(k, hiddenFile))
+			k.mu.Unlock()
+		})
+	}
+}
+
+func hasKqueuePath(k *kqueue, path string) bool {
+	_, exists := k.paths[path]
+	return exists
+}
+
+func closeKqueueForTest(k *kqueue) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for fd := range k.wds {
+		_ = unix.Close(fd)
+	}
+	_ = unix.Close(k.kqFd)
+	_ = unix.Close(k.wakeRead)
+	_ = unix.Close(k.wakeWrite)
+}
+
 func TestAddSingleWatchLocked(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "test_single_watch_*.txt")
+	tmpFile, err := os.CreateTemp(tempDir, "test_single_watch_*.txt")
 	require.NoError(t, err)
 	defer os.Remove(tmpFile.Name())
 	tmpFile.Close()
@@ -306,7 +525,7 @@ func TestAddSingleWatchLocked(t *testing.T) {
 
 	k, err := newKqueue(wImpl)
 	require.NoError(t, err)
-	defer unix.Close(k.kqFd)
+	defer closeKqueueForTest(k)
 
 	k.mu.Lock()
 	err = k.addSingleWatchLocked(tmpFile.Name())
@@ -325,7 +544,7 @@ func TestAddSingleWatchLocked(t *testing.T) {
 }
 
 func TestRemoveWatch(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "test_remove_watch_*")
+	tmpDir, err := os.MkdirTemp(tempDir, "test_remove_watch_*")
 	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
 
@@ -339,7 +558,7 @@ func TestRemoveWatch(t *testing.T) {
 
 	k, err := newKqueue(wImpl)
 	require.NoError(t, err)
-	defer unix.Close(k.kqFd)
+	defer closeKqueueForTest(k)
 
 	wp := &WatchPath{Path: tmpDir}
 	err = k.addWatch(wp)
@@ -355,4 +574,30 @@ func TestRemoveWatch(t *testing.T) {
 	// Should be empty as we removed the root
 	assert.Empty(t, k.paths)
 	assert.Empty(t, k.wds)
+}
+
+func TestKqueueCancellationDoesNotDependOnCooldown(t *testing.T) {
+	for _, cooldown := range []time.Duration{0, MaxCooldownDuration} {
+		t.Run(cooldown.String(), func(t *testing.T) {
+			ready := make(chan struct{})
+			w, err := New(WithPath(canonicalTempDir(t)), WithCooldown(cooldown), WithReadyChannel(ready), WithSeverity(SeverityNone))
+			require.NoError(t, err)
+			ctx, cancel := context.WithCancel(context.Background())
+			stopped := make(chan error, 1)
+			go func() { stopped <- w.Watch(ctx) }()
+			select {
+			case <-ready:
+			case <-time.After(5 * time.Second):
+				cancel()
+				t.Fatal("not ready")
+			}
+			cancel()
+			select {
+			case err := <-stopped:
+				require.NoError(t, err)
+			case <-time.After(time.Second):
+				t.Fatal("kqueue did not wake on cancellation")
+			}
+		})
+	}
 }

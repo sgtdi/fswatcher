@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -16,9 +17,12 @@ import (
 
 // Default values for watcher config
 const (
-	DefaultCooldown       = 100 * time.Millisecond
-	DefaultBufferSize     = 4096
-	DefaultReadBufferSize = 64 * 1024
+	DefaultCooldown         = 100 * time.Millisecond
+	DefaultBufferSize       = 4096
+	DefaultReadBufferSize   = 64 * 1024
+	DefaultMaxWait          = time.Second
+	DefaultMaxPendingEvents = 4096
+	MinReadBufferSize       = 4096
 )
 
 // Limits and validation constants
@@ -35,16 +39,18 @@ type WatcherStats struct {
 	StartTime       time.Time     // StartTime is when the watcher was created
 	Uptime          time.Duration // Uptime is the duration the watcher has been running
 	EventsProcessed int64         // EventsProcessed is the count of events sent to the Events channel
+	EventsCoalesced int64         // EventsCoalesced is the count of raw events merged into a pending event for the same path
 	EventsDropped   int64         // EventsDropped is the count of events sent to the Dropped channel
-	EventsFiltered  int64         // EventsFiltered is the count of events ignored by filters or debouncing
+	EventsFiltered  int64         // EventsFiltered is the count of events ignored by path, depth, type, or ignore-list filters
 	EventsLost      int64         // EventsLost is the count of events lost when all channels were full
-	EventsPartial   int64         // EventsPartial is the count of partial backend registrations
+	EventsPartial   int64         // EventsPartial is the count of inotify registrations skipped at watch limits or failed during overflow recovery
 	ProcessingRate  float64       // ProcessingRate is the number of events processed per second
 }
 
 // watcherStats holds internal, mutable statistics
 type watcherStats struct {
 	eventsProcessed int64
+	eventsCoalesced int64
 	eventsDropped   int64
 	eventsFiltered  int64
 	eventsLost      int64
@@ -63,15 +69,20 @@ type watcher struct {
 	isUsed         atomic.Bool
 
 	// Configuration fields
-	init               error
-	cooldown           time.Duration
-	bufferSize         int
-	readBufferSize     int
-	severity           Severity
-	ownsEventsChannel  bool
-	ownsDroppedChannel bool
-	incRegexPatterns   []string
-	excRegexPatterns   []string
+	init                 error
+	cooldown             time.Duration
+	maxWait              time.Duration
+	maxWaitSet           bool
+	maxPending           int
+	bufferSize           int
+	readBufferSize       int
+	severity             Severity
+	ownsEventsChannel    bool
+	ownsDroppedChannel   bool
+	incRegexPatterns     []string
+	excRegexPatterns     []string
+	includeHidden        bool
+	hiddenAttributeCache hiddenAttributeCache
 
 	// Ignored file patterns, set by WithIgnoreList; nil uses the defaults
 	ignoreList []string
@@ -80,11 +91,15 @@ type watcher struct {
 	platformLinux PlatformLinux
 
 	// Channels
-	events    chan WatchEvent
-	dropped   chan WatchEvent
-	done      chan struct{}
-	readyChan chan struct{}
-	scanCtx   context.Context
+	events      chan WatchEvent
+	dropped     chan WatchEvent
+	done        chan struct{}
+	readyChan   chan struct{}
+	scanCtx     context.Context
+	scanMu      sync.Mutex
+	scanPending map[string]struct{}
+	scanWorker  bool
+	scanWorkers sync.WaitGroup
 
 	// Components
 	aggregator *EventAggregator
@@ -93,6 +108,8 @@ type watcher struct {
 	// Paths
 	paths        []*WatchPath
 	watchedPaths map[string]*WatchPath
+	watchAliases map[string]string
+	rootIndex    *watchRootNode
 	pathMu       sync.RWMutex
 	opsMu        sync.Mutex
 
@@ -138,12 +155,14 @@ func New(options ...WatcherOpt) (Watcher, error) {
 	w := &watcher{
 		done:               make(chan struct{}),
 		cooldown:           DefaultCooldown,
+		maxPending:         DefaultMaxPendingEvents,
 		bufferSize:         DefaultBufferSize,
 		readBufferSize:     DefaultReadBufferSize,
 		ownsEventsChannel:  true,
 		ownsDroppedChannel: true,
 		severity:           SeverityWarn,
 		watchedPaths:       make(map[string]*WatchPath),
+		watchAliases:       make(map[string]string),
 	}
 
 	// Apply user-provided options
@@ -158,6 +177,9 @@ func New(options ...WatcherOpt) (Watcher, error) {
 		return nil, w.init
 	}
 
+	if !w.maxWaitSet {
+		w.maxWait = max(DefaultMaxWait, w.cooldown)
+	}
 	if err := w.validateConfig(); err != nil {
 		return nil, newError("config", "", err)
 	}
@@ -178,7 +200,9 @@ func New(options ...WatcherOpt) (Watcher, error) {
 	// Add initial paths to the watchedPaths map
 	for _, wp := range w.paths {
 		w.watchedPaths[wp.Path] = wp
+		w.watchAliases[wp.requestedPath] = wp.Path
 	}
+	w.rebuildRootIndexLocked()
 	w.paths = nil
 
 	// Create channels
@@ -232,109 +256,116 @@ func (w *watcher) Watch(ctx context.Context) (retErr error) {
 	if !w.isUsed.CompareAndSwap(false, true) {
 		return newError("start", "", errors.New("watcher is single-use; create a new watcher instance"))
 	}
-
-	if err := w.initLogger(); err != nil {
-		return err
+	var platformDone <-chan struct{}
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	startup := false
+	watchCtx, cancel := context.WithCancel(ctx)
 	defer func() {
-		if retErr == nil || startup {
-			return
+		cancel()
+		if platformDone != nil {
+			<-platformDone
+		}
+		w.opsMu.Lock()
+		w.isShuttingDown.Store(true)
+		w.isRunning.Store(false)
+		w.opsMu.Unlock()
+		w.scanMu.Lock()
+		w.scanMu.Unlock()
+		w.scanWorkers.Wait()
+		w.aggregator.close()
+		if w.ownsEventsChannel {
+			close(w.events)
+		}
+		if w.ownsDroppedChannel {
+			close(w.dropped)
 		}
 		w.logMu.Lock()
-		defer w.logMu.Unlock()
 		if w.logFile != nil {
 			_ = w.logFile.Close()
 			w.logFile = nil
 		}
+		w.logMu.Unlock()
 	}()
 
-	if w.severity <= SeverityDebug {
-		w.logDebug("Watcher configuration",
-			"cooldown", w.cooldown,
-			"bufferSize", w.bufferSize)
-		w.pathMu.RLock()
-		paths := make([]string, 0, len(w.watchedPaths))
-		for p := range w.watchedPaths {
-			paths = append(paths, p)
-		}
-		w.pathMu.RUnlock()
-		w.logDebug("Watcher paths", "paths", paths)
+	if err := w.initLogger(); err != nil {
+		return err
 	}
-
-	if !w.isRunning.CompareAndSwap(false, true) {
-		return newError("start", "", errors.New("watcher is already running"))
-	}
-	defer w.isRunning.Store(false)
-
-	watchCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	w.scanCtx = watchCtx
-
 	go func() {
 		select {
 		case <-w.done:
-		case <-ctx.Done():
+			cancel()
+		case <-watchCtx.Done():
 		}
-		cancel()
 	}()
 
-	// Start the platform-specific watching mechanism
-	done, err := w.startPlatform(watchCtx)
+	// Serialize initialization and runtime operations with backend cleanup.
+	w.opsMu.Lock()
+	w.scanCtx = watchCtx
+	w.isRunning.Store(true)
+	var err error
+	platformDone, err = w.startPlatform(watchCtx)
 	if err != nil {
+		w.opsMu.Unlock()
 		return err
 	}
-
-	// Start watching the initial set of paths synchronously
-	// If any path fails to initialize, fail fast and return an error
 	w.pathMu.RLock()
 	initialPaths := make([]*WatchPath, 0, len(w.watchedPaths))
 	for _, wp := range w.watchedPaths {
 		initialPaths = append(initialPaths, wp)
 	}
 	w.pathMu.RUnlock()
-
-	for _, watchPath := range initialPaths {
-		if err := w.addWatch(watchPath); err != nil {
-			cancel()
-			<-done
-			return newError("startWatch", watchPath.Path, err)
+	for _, path := range initialPaths {
+		if watchCtx.Err() != nil {
+			w.opsMu.Unlock()
+			return nil
+		}
+		if _, err := validateWatchPath(path.Path, path.Depth); err != nil {
+			w.opsMu.Unlock()
+			return newError("startWatch", path.Path, err)
+		}
+		if err := w.addWatch(path); err != nil {
+			w.opsMu.Unlock()
+			return newError("startWatch", path.Path, err)
 		}
 	}
-
+	if watchCtx.Err() != nil {
+		w.opsMu.Unlock()
+		return nil
+	}
 	if w.readyChan != nil {
 		close(w.readyChan)
 	}
-	startup = true
-
-	// Wait for the context to be canceled
-	<-watchCtx.Done()
-
-	// Wait for the platform watcher to shut down completely
-	<-done
-
-	w.logInfo("Watcher shutting down...")
-	w.isShuttingDown.Store(true)
-
-	if w.aggregator != nil {
-		w.aggregator.close()
-	}
-
-	if w.ownsEventsChannel {
-		close(w.events)
-	}
-	if w.ownsDroppedChannel {
-		close(w.dropped)
-	}
-
-	w.logInfo("Watcher shutdown completed")
-
-	if w.logFile != nil {
-		if err := w.logFile.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "fswatcher: error closing log file: %v\n", err)
-		}
+	w.opsMu.Unlock()
+	if err := waitForWatchStop(watchCtx, platformDone); err != nil {
+		return newError("watch", "", err)
 	}
 	return nil
+}
+
+// lockPlatformShutdown prevents runtime operations from attaching watches to
+// resources that the backend is about to release. Callers must unlock opsMu.
+func (w *watcher) lockPlatformShutdown() {
+	w.opsMu.Lock()
+	w.isShuttingDown.Store(true)
+	w.isRunning.Store(false)
+}
+
+func (w *watcher) canChangePaths() bool {
+	return w.IsRunning() && !w.isShuttingDown.Load() && (w.scanCtx == nil || w.scanCtx.Err() == nil)
+}
+
+func waitForWatchStop(ctx context.Context, platformDone <-chan struct{}) error {
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-platformDone:
+		// Cancellation wins if it raced with backend shutdown.
+		if ctx.Err() != nil {
+			return nil
+		}
+		return errors.New("platform watcher stopped unexpectedly")
+	}
 }
 
 // AddPath adds a new directory to watch at runtime
@@ -342,13 +373,13 @@ func (w *watcher) AddPath(path string, options ...PathOption) error {
 	if !w.IsRunning() {
 		return newError("AddPath", path, errors.New("watcher is not running"))
 	}
-	w.opsMu.Lock()
-	defer w.opsMu.Unlock()
-
+	// Apply caller options before acquiring the lifecycle lock.
 	// Create a temporary WatchPath to apply options
 	watchPath := &WatchPath{Path: path, Depth: WatchNested}
 	for _, opt := range options {
-		opt(watchPath)
+		if opt != nil {
+			opt(watchPath)
+		}
 	}
 
 	wp, err := validateWatchPath(watchPath.Path, watchPath.Depth)
@@ -368,6 +399,12 @@ func (w *watcher) AddPath(path string, options ...PathOption) error {
 		wp.filter = f
 	}
 
+	w.opsMu.Lock()
+	defer w.opsMu.Unlock()
+	if !w.canChangePaths() {
+		return newError("AddPath", path, errors.New("watcher is not running"))
+	}
+
 	w.pathMu.Lock()
 	if _, exists := w.watchedPaths[wp.Path]; exists {
 		w.pathMu.Unlock()
@@ -375,14 +412,21 @@ func (w *watcher) AddPath(path string, options ...PathOption) error {
 	}
 	// Reserve first so concurrent AddPath calls for the same path are deterministic
 	w.watchedPaths[wp.Path] = wp
+	w.rebuildRootIndexLocked()
 	w.pathMu.Unlock()
 
+	w.hiddenAttributeCache.invalidateAll()
 	if err := w.addWatch(wp); err != nil {
 		w.pathMu.Lock()
 		delete(w.watchedPaths, wp.Path)
+		w.rebuildRootIndexLocked()
 		w.pathMu.Unlock()
+		_ = w.removeWatch(wp.Path)
 		return err
 	}
+	w.pathMu.Lock()
+	w.watchAliases[wp.requestedPath] = wp.Path
+	w.pathMu.Unlock()
 
 	w.logInfo("Successfully added new watch path", "path", wp.Path, "depth", wp.Depth)
 	return nil
@@ -395,13 +439,19 @@ func (w *watcher) DropPath(path string) error {
 	}
 	w.opsMu.Lock()
 	defer w.opsMu.Unlock()
+	if !w.canChangePaths() {
+		return newError("DropPath", path, errors.New("watcher is not running"))
+	}
 
-	wp, err := validateWatchPath(path, WatchNested) // Depth doesn't matter for removal
+	wp, err := cleanWatchPath(path)
 	if err != nil {
 		return err
 	}
 
 	w.pathMu.Lock()
+	if canonical, exists := w.watchAliases[wp.Path]; exists {
+		wp.Path = canonical
+	}
 	if _, exists := w.watchedPaths[wp.Path]; !exists {
 		w.pathMu.Unlock()
 		return newError("DropPath", path, errors.New("path is not being watched"))
@@ -412,13 +462,34 @@ func (w *watcher) DropPath(path string) error {
 		w.logError("Platform backend failed to remove watch", "path", wp.Path, "error", err)
 		return err
 	}
+	w.hiddenAttributeCache.invalidateAll()
 
 	w.pathMu.Lock()
 	delete(w.watchedPaths, wp.Path)
+	for alias, canonical := range w.watchAliases {
+		if canonical == wp.Path {
+			delete(w.watchAliases, alias)
+		}
+	}
+	w.rebuildRootIndexLocked()
 	w.pathMu.Unlock()
 
 	w.logInfo("Successfully removed watch path", "path", wp.Path)
 	return nil
+}
+
+// cleanWatchPath normalizes a path used to remove an existing watch without
+// requiring the directory to still exist. A watched directory can be deleted
+// or renamed before the caller gets a chance to drop it.
+func cleanWatchPath(path string) (*WatchPath, error) {
+	if path == "" {
+		return nil, newError("DropPath", "", errors.New("path cannot be empty"))
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, newError("DropPath", path, fmt.Errorf("failed to get absolute path: %w", err))
+	}
+	return &WatchPath{Path: filepath.Clean(absPath), Depth: WatchNested}, nil
 }
 
 // Events returns the event channel
@@ -437,6 +508,7 @@ func (w *watcher) Stats() WatcherStats {
 	stats := WatcherStats{
 		StartTime:       w.stats.startTime,
 		EventsProcessed: atomic.LoadInt64(&w.stats.eventsProcessed),
+		EventsCoalesced: atomic.LoadInt64(&w.stats.eventsCoalesced),
 		EventsDropped:   atomic.LoadInt64(&w.stats.eventsDropped),
 		EventsFiltered:  atomic.LoadInt64(&w.stats.eventsFiltered),
 		EventsLost:      atomic.LoadInt64(&w.stats.eventsLost),
@@ -500,8 +572,14 @@ func (w *watcher) validateConfig() error {
 	if w.bufferSize <= 0 || w.bufferSize > MaxBufferSize {
 		return fmt.Errorf("buffer size must be between 1 and %d", MaxBufferSize)
 	}
-	if w.readBufferSize <= 0 || w.readBufferSize > MaxReadBufferSize {
-		return fmt.Errorf("read buffer size must be between 1 and %d", MaxReadBufferSize)
+	if w.readBufferSize < MinReadBufferSize || w.readBufferSize > MaxReadBufferSize {
+		return fmt.Errorf("read buffer size must be between %d and %d", MinReadBufferSize, MaxReadBufferSize)
+	}
+	if w.maxWait < 0 {
+		return errors.New("maximum aggregation wait must not be negative")
+	}
+	if w.maxPending < 1 || w.maxPending > MaxBufferSize {
+		return fmt.Errorf("maximum pending events must be between 1 and %d", MaxBufferSize)
 	}
 	if w.cooldown < 0 || w.cooldown > MaxCooldownDuration {
 		return fmt.Errorf("cooldown must be between 0 and %v", MaxCooldownDuration)
@@ -572,9 +650,62 @@ func (w *watcher) sendToChannel(event WatchEvent) {
 }
 
 // scanDirectory performs a manual scan of a directory and emits events for its contents
+func (w *watcher) queueScan(path string) {
+	w.scanMu.Lock()
+	defer w.scanMu.Unlock()
+	if w.isShuttingDown.Load() {
+		return
+	}
+	if w.scanPending == nil {
+		w.scanPending = make(map[string]struct{})
+	}
+	for pending := range w.scanPending {
+		if pending == path || isSubpath(pending, path) {
+			return
+		}
+		if isSubpath(path, pending) {
+			delete(w.scanPending, pending)
+		}
+	}
+	w.scanPending[path] = struct{}{}
+	if w.scanWorker {
+		return
+	}
+	w.scanWorker = true
+	w.scanWorkers.Add(1)
+	go func() {
+		defer w.scanWorkers.Done()
+		for {
+			w.scanMu.Lock()
+			var next string
+			for pending := range w.scanPending {
+				next = pending
+				delete(w.scanPending, pending)
+				break
+			}
+			if next == "" {
+				w.scanWorker = false
+				w.scanMu.Unlock()
+				return
+			}
+			w.scanMu.Unlock()
+			w.scanDirectory(next)
+		}
+	}()
+}
+
 func (w *watcher) scanDirectory(path string) {
 	if w.isShuttingDown.Load() {
 		return
+	}
+	if !w.includeHidden {
+		watchRoot := path
+		if parentWatch := w.findMostSpecificWatchPath(path); parentWatch != nil {
+			watchRoot = parentWatch.Path
+		}
+		if w.isHiddenPathWithin(path, watchRoot) {
+			return
+		}
 	}
 
 	w.logInfo("Starting manual scan of directory", "path", path)
@@ -593,6 +724,12 @@ func (w *watcher) scanDirectory(path string) {
 		if err != nil {
 			return nil // Skip files with errors
 		}
+		if !w.includeHidden && w.isHiddenPathWithin(filePath, filePath) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 
 		// Don't emit event for the root path being scanned
 		if filePath == path {
@@ -605,7 +742,7 @@ func (w *watcher) scanDirectory(path string) {
 			case <-ctx.Done():
 				return filepath.SkipAll
 			default:
-				time.Sleep(time.Millisecond)
+				runtime.Gosched()
 			}
 		}
 
@@ -671,22 +808,27 @@ func (w *watcher) resetBackoff(state *backoffState) {
 
 // findMostSpecificWatchPath resolves the most specific watched root for a path
 func (w *watcher) findMostSpecificWatchPath(path string) *WatchPath {
+	w.ensureRootIndex()
 	w.pathMu.RLock()
 	defer w.pathMu.RUnlock()
+	return w.rootIndex.find(path)
+}
 
-	var parentWatch *WatchPath
-	bestMatchLen := -1
-
-	for watchedDir, wp := range w.watchedPaths {
-		if path == watchedDir || isSubpath(watchedDir, path) {
-			if n := len(watchedDir); n > bestMatchLen {
-				bestMatchLen = n
-				parentWatch = wp
-			}
+// nativeWatchNeeded reports whether a configured root still needs a descriptor
+// for path. kqueue also watches direct children of top-level roots; inotify
+// needs directory descriptors only for recursive roots and explicit roots.
+func (w *watcher) nativeWatchNeeded(path, excludedRoot string, directChildren bool) bool {
+	w.pathMu.RLock()
+	defer w.pathMu.RUnlock()
+	for root, wp := range w.watchedPaths {
+		if root == excludedRoot {
+			continue
+		}
+		if path == root || (wp.Depth == WatchNested && isSubpath(root, path)) || (directChildren && filepath.Dir(path) == root) {
+			return true
 		}
 	}
-
-	return parentWatch
+	return false
 }
 
 // handlePlatformEvent processes raw events from the OS
@@ -697,19 +839,33 @@ func (w *watcher) handlePlatformEvent(event WatchEvent) {
 
 	// Overflow events have no path and must bypass all path-based filtering
 	if slices.Contains(event.Types, EventOverflow) {
+		w.hiddenAttributeCache.invalidateAll()
 		w.aggregator.addEvent(event)
 		return
 	}
 
+	if slices.Contains(event.Types, EventCreate) || slices.Contains(event.Types, EventRemove) || slices.Contains(event.Types, EventRename) {
+		// A structural change can replace a cached directory tree at this path.
+		w.hiddenAttributeCache.invalidateAll()
+	} else if slices.Contains(event.Types, EventChmod) || (runtime.GOOS == "windows" && slices.Contains(event.Types, EventMod)) {
+		// Windows reports attribute changes as FILE_ACTION_MODIFIED, which maps
+		// to EventMod alongside ordinary file writes.
+		w.hiddenAttributeCache.invalidatePath(event.Path)
+	}
+
 	// Platform-agnostic depth filtering
 	parentWatch := w.findMostSpecificWatchPath(event.Path)
+	if parentWatch == nil {
+		atomic.AddInt64(&w.stats.eventsFiltered, 1)
+		return
+	}
 
 	// If the parent watch is configured for top-level only, check the depth
 	if parentWatch != nil && parentWatch.Depth == WatchTopLevel {
 		// Get the directory of the event path
 		eventDir := filepath.Dir(event.Path)
 		// If the event's directory is not the same as the watched path, it's a subdirectory event so will be ignored
-		if filepath.Clean(eventDir) != filepath.Clean(parentWatch.Path) {
+		if event.Path != parentWatch.Path && filepath.Clean(eventDir) != filepath.Clean(parentWatch.Path) {
 			w.logDebug("Filtered by depth", "path", event.Path)
 			atomic.AddInt64(&w.stats.eventsFiltered, 1)
 			return
@@ -724,7 +880,7 @@ func (w *watcher) handlePlatformEvent(event WatchEvent) {
 		"time", event.Time)
 
 	// Filter system files
-	if w.isIgnored(event.Path) {
+	if w.isIgnoredForWatch(event.Path, parentWatch) {
 		w.logDebug("Filtered system file", "path", event.Path)
 		atomic.AddInt64(&w.stats.eventsFiltered, 1)
 		return
