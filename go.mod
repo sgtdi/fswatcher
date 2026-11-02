@@ -1,4 +1,4 @@
-module github.com/sgtdi/fswatcher
+module github.com/sgtdi/fswatcher/v2
 
 go 1.27.3
 

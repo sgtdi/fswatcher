@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/sgtdi/fswatcher"
+	"github.com/sgtdi/fswatcher/v2"
 )
 
 func main() {
