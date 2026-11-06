@@ -2,6 +2,22 @@
 
 Notable changes are recorded here starting with version 2.0.0. Earlier release notes are available in [GitHub Releases](https://github.com/sgtdi/fswatcher/releases).
 
+## [Unreleased]
+
+### Added
+
+- Pin golangci-lint and run formatting, module consistency, full go vet, and lint checks in CI for both Go modules across all supported backends.
+
+### Fixed
+
+- Preserve fanotify registration and rollback errors together, continuing cleanup after a mark cannot be removed.
+- Wait for readiness and verify watcher shutdown in the Windows creation-event test.
+
+### Changed
+
+- Replace the retired Go Report Card badge with the Go quality workflow badge and document local lint commands.
+- Remove unused internal helpers and make best-effort descriptor cleanup explicit.
+
 ## [2.0.0] - 2026-11-02
 
 ### Breaking changes
@@ -57,4 +73,5 @@ go get github.com/sgtdi/fswatcher/v2@v2.0.0
 
 Applications that require hidden entries and an unbounded debounce wait can configure `WithHidden()` and `WithMaxWait(0)`. See the [migration guide](README.md#updating-existing-callers) for the complete behavior changes.
 
+[Unreleased]: https://github.com/sgtdi/fswatcher/compare/v2.0.0...main
 [2.0.0]: https://github.com/sgtdi/fswatcher/compare/v1.3.0...v2.0.0
