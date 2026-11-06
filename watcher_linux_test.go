@@ -125,6 +125,54 @@ func TestFanotifyRecursiveMarksAndDynamicDirectories(t *testing.T) {
 	assert.NotContains(t, marked, hidden, "hidden directories should stay unmarked by default")
 }
 
+func TestFanotifyMarkFailureRollsBackAndReportsCleanupErrors(t *testing.T) {
+	markErr := errors.New("cannot add mark")
+	rollbackA := errors.New("cannot remove mark a")
+	rollbackB := errors.New("cannot remove mark b")
+	for _, tc := range []struct {
+		name     string
+		failures map[string]error
+	}{
+		{name: "successful rollback"},
+		{name: "rollback continues after cleanup failures", failures: map[string]error{"a": rollbackA, "b": rollbackB}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []string
+			p := &fanotify{
+				markRefs: map[string]int{"shared": 1},
+				markFn: func(path string, add bool) error {
+					if add {
+						calls = append(calls, "+"+path)
+						if path == "failed" {
+							return markErr
+						}
+						return nil
+					}
+					calls = append(calls, "-"+path)
+					return tc.failures[path]
+				},
+			}
+			root := &fanotifyRoot{dirs: make(map[string]struct{})}
+			err := p.addDirectoriesLocked(root, []string{"shared", "a", "b", "c", "failed"})
+			require.ErrorIs(t, err, markErr)
+			for path, cleanupErr := range tc.failures {
+				require.ErrorIs(t, err, cleanupErr)
+				require.ErrorContains(t, err, `rollback fanotify mark "`+path+`"`)
+			}
+			require.Equal(t, []string{"+a", "+b", "+c", "+failed", "-c", "-b", "-a"}, calls,
+				"rollback must attempt every new mark and preserve the shared mark")
+			wantRefs := map[string]int{"shared": 1}
+			wantDirs := make(map[string]struct{})
+			for path := range tc.failures {
+				wantRefs[path] = 1
+				wantDirs[path] = struct{}{}
+			}
+			require.Equal(t, wantRefs, p.markRefs)
+			require.Equal(t, wantDirs, root.dirs)
+		})
+	}
+}
+
 func TestFanotifyOverflowEmitsEventAndReconcilesMarks(t *testing.T) {
 	root := t.TempDir()
 	w, err := New(WithPath(root), WithCooldown(time.Millisecond), WithSeverity(SeverityNone))
@@ -241,7 +289,7 @@ func TestInotify_RemoveWatchCleansState(t *testing.T) {
 
 	p, err := newInotify()
 	require.NoError(t, err)
-	defer unix.Close(p.fd)
+	t.Cleanup(func() { require.NoError(t, unix.Close(p.fd)) })
 
 	wp, err := validateWatchPath(dir, WatchNested)
 	require.NoError(t, err)

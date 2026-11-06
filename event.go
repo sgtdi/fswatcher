@@ -271,7 +271,6 @@ func (ea *EventAggregator) run() {
 			if timer != nil {
 				timer.Stop()
 				timer = nil
-				timerC = nil
 			}
 			select {
 			case <-ea.wake:

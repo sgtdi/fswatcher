@@ -1,0 +1,123 @@
+name: Go quality
+
+on:
+  push:
+    branches: [main, dev, 'feature/**', 'feat/**', 'fix/**', 'chore/**']
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  consistency:
+    name: Formatting and modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            integration/compat/go.sum
+      - name: Check formatting in both modules
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [[ -n "$unformatted" ]]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+      - name: Verify module checksums and dependency files
+        shell: bash
+        run: |
+          for module in . integration/compat; do
+            (
+              cd "$module"
+              go mod verify
+              go mod tidy -diff
+            )
+          done
+
+  lint:
+    name: Lint on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux
+            cgo: '1'
+          - os: windows-latest
+            name: Windows
+            cgo: '0'
+          - os: macos-latest
+            name: macOS FSEvents
+            cgo: '1'
+          - os: macos-latest
+            name: macOS kqueue
+            cgo: '0'
+    env:
+      CGO_ENABLED: ${{ matrix.cgo }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            integration/compat/go.sum
+      - name: Run go vet
+        run: go vet ./...
+      - name: Run go vet on v1/v2 compatibility
+        working-directory: integration/compat
+        run: go vet ./...
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version-file: .golangci-lint-version
+          args: ./...
+      - name: Lint v1/v2 compatibility
+        working-directory: integration/compat
+        run: golangci-lint run --config ../../.golangci.yml ./...
+
+  bsd-lint:
+    name: Lint BSD backends
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            integration/compat/go.sum
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version-file: .golangci-lint-version
+          install-only: true
+      - name: Vet and lint both modules for each BSD target
+        shell: bash
+        run: |
+          for target in freebsd openbsd netbsd dragonfly; do
+            for module in . integration/compat; do
+              printf 'Checking %s (%s/amd64)\n' "$module" "$target"
+              (
+                cd "$module"
+                export GOOS="$target" GOARCH=amd64 CGO_ENABLED=0
+                go vet ./...
+                golangci-lint run ./...
+              )
+            done
+          done

@@ -1,5 +1,5 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/sgtdi/fswatcher/v2.svg)](https://pkg.go.dev/github.com/sgtdi/fswatcher/v2)
-[![Go Report Card](https://goreportcard.com/badge/github.com/sgtdi/fswatcher)](https://goreportcard.com/report/github.com/sgtdi/fswatcher)
+[![Go quality](https://github.com/sgtdi/fswatcher/actions/workflows/quality.yml/badge.svg)](https://github.com/sgtdi/fswatcher/actions/workflows/quality.yml)
 [![CI](https://github.com/sgtdi/fswatcher/actions/workflows/ci-test.yml/badge.svg)](https://github.com/sgtdi/fswatcher/actions/workflows/ci-test.yml)
 [![CodeQL](https://github.com/sgtdi/fswatcher/actions/workflows/codeql.yml/badge.svg)](https://github.com/sgtdi/fswatcher/actions/workflows/codeql.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -376,6 +376,17 @@ CGO_ENABLED=0 go test -shuffle=on ./...
 ```
 
 The [Go CI workflow](.github/workflows/ci-test.yml) runs native tests on Linux, Windows, and both macOS backends, plus privileged fanotify integration and BSD compilation checks. The [BSD runtime workflow](.github/workflows/bsd-runtime.yml) executes native test binaries in FreeBSD, OpenBSD, NetBSD, and DragonFly VMs. [CodeQL](.github/workflows/codeql.yml) provides automated static analysis.
+
+The [Go quality workflow](.github/workflows/quality.yml) checks formatting and module consistency, and runs full `go vet` and `golangci-lint` analysis for both the library and the v1/v2 compatibility module. It covers Linux, Windows, both macOS backends, and cross-analysis of FreeBSD, OpenBSD, NetBSD, and DragonFly. The enabled linters are `errcheck`, `govet`, `ineffassign`, `staticcheck`, and `unused`; tests are included.
+
+To reproduce the lint checks locally, [install golangci-lint](https://golangci-lint.run/docs/welcome/install/local/) at the version pinned in [`.golangci-lint-version`](.golangci-lint-version), then run:
+
+```sh
+golangci-lint run ./...
+(cd integration/compat && go vet ./... && golangci-lint run --config ../../.golangci.yml ./...)
+```
+
+The lint tools are installed separately and add no library dependencies. Backend-specific `unused` exceptions and the shutdown synchronization barrier are documented at their declarations in the source.
 
 Fanotify integration requires suitable privileges and a filesystem that supports file handles. Setting `FSWATCHER_REQUIRE_FANOTIFY=1` makes an unavailable backend fail the integration test instead of skipping it; CI enables this for its privileged fanotify step.
 

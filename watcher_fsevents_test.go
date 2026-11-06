@@ -16,8 +16,7 @@ import (
 func TestFSEventsMetadataRefreshesHiddenCache(t *testing.T) {
 	for _, flag := range []uint32{FSEventStreamEventFlagItemInodeMetaMod, FSEventStreamEventFlagItemFinderInfoMod, FSEventStreamEventFlagItemXattrMod} {
 		t.Run(fmt.Sprintf("flags_%x", flag), func(t *testing.T) {
-			root, err := filepath.EvalSymlinks(t.TempDir())
-			require.NoError(t, err)
+			root := canonicalTempDir(t)
 			path := filepath.Join(root, "visible.dat")
 			require.NoError(t, os.WriteFile(path, []byte("data"), 0600))
 			wi, err := New(WithPath(root), WithSeverity(SeverityNone))
@@ -26,7 +25,7 @@ func TestFSEventsMetadataRefreshesHiddenCache(t *testing.T) {
 			defer w.aggregator.close()
 			require.False(t, w.isIgnored(path))
 			require.NoError(t, unix.Chflags(path, unix.UF_HIDDEN))
-			defer unix.Chflags(path, 0)
+			t.Cleanup(func() { require.NoError(t, unix.Chflags(path, 0)) })
 			w.handleDarwinEvent(path, flag|FSEventStreamEventFlagItemIsFile, 1, time.Now())
 			require.True(t, w.isIgnored(path))
 			require.Empty(t, w.aggregator.events, "hidden metadata event must not be delivered")
