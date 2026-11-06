@@ -444,7 +444,9 @@ func (p *fanotify) addDirectoriesLocked(root *fanotifyRoot, dirs []string) error
 		if p.markRefs[dir] == 0 {
 			if err := p.markDirectory(dir, true); err != nil {
 				for i := len(added) - 1; i >= 0; i-- {
-					p.releaseDirectoryLocked(root, added[i])
+					if rollbackErr := p.releaseDirectoryLocked(root, added[i]); rollbackErr != nil {
+						err = errors.Join(err, fmt.Errorf("rollback fanotify mark %q: %w", added[i], rollbackErr))
+					}
 				}
 				return err
 			}
