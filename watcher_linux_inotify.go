@@ -67,30 +67,6 @@ func (n *pathTrieNode) findNode(path string) *pathTrieNode {
 	return node
 }
 
-// findAllChildren performs a DFS from a given node to find all descendant watches
-func (n *pathTrieNode) findAllChildren() []int {
-	var wds []int
-	if n == nil {
-		return wds
-	}
-
-	var queue []*pathTrieNode
-	queue = append(queue, n)
-
-	for len(queue) > 0 {
-		node := queue[0]
-		queue = queue[1:]
-
-		if node.wd != -1 {
-			wds = append(wds, node.wd)
-		}
-		for _, child := range node.children {
-			queue = append(queue, child)
-		}
-	}
-	return wds
-}
-
 // inotify is the inotify platform implementation
 type inotifyMove struct {
 	path        string
@@ -131,12 +107,12 @@ func setupEpoll(inotifyFD, eventFD int) (int, error) {
 	}
 
 	if err := unix.EpollCtl(epfd, unix.EPOLL_CTL_ADD, inotifyFD, &unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(inotifyFD)}); err != nil {
-		unix.Close(epfd)
+		_ = unix.Close(epfd)
 		return -1, fmt.Errorf("epollCtl add inotify error: %w", err)
 	}
 
 	if err := unix.EpollCtl(epfd, unix.EPOLL_CTL_ADD, eventFD, &unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(eventFD)}); err != nil {
-		unix.Close(epfd)
+		_ = unix.Close(epfd)
 		return -1, fmt.Errorf("epollCtl add eventfd error: %w", err)
 	}
 
@@ -173,14 +149,14 @@ func (w *watcher) runInotifyLoop(ctx context.Context, p *inotify, done chan stru
 		w.logError("inotify eventfd error", "error", err)
 		return
 	}
-	defer unix.Close(eventFD)
+	defer func() { _ = unix.Close(eventFD) }()
 
 	epfd, err := setupEpoll(p.fd, eventFD)
 	if err != nil {
 		w.logError("inotify setup error", "error", err)
 		return
 	}
-	defer unix.Close(epfd)
+	defer func() { _ = unix.Close(epfd) }()
 
 	stopWake := startCancellationWakeup(ctx, func() {
 		var val uint64 = 1

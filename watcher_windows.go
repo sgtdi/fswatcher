@@ -202,11 +202,7 @@ func (w *watcher) handleWindowsEvents(wp *watchedPath, bytesRead uint32) {
 	now := time.Now()
 	offset := uint32(0)
 
-	for {
-		if offset >= bytesRead {
-			break
-		}
-
+	for offset < bytesRead {
 		raw := (*fileNotifyInformation)(unsafe.Pointer(&wp.buffer[offset]))
 
 		utf16path := unsafe.Slice((*uint16)(unsafe.Pointer(&raw.FileName)), raw.FileNameLength/2)
@@ -277,12 +273,12 @@ func (w *watcher) addWatch(watchPath *WatchPath) error {
 	}
 
 	if _, err := windows.CreateIoCompletionPort(handle, iocp, key, 0); err != nil {
-		windows.Close(handle)
+		_ = windows.Close(handle)
 		return newError("associateIoCp", path, err)
 	}
 
 	if err := w.readChanges(wp); err != nil {
-		windows.Close(handle)
+		_ = windows.Close(handle)
 		return newError("initialRead", path, err)
 	}
 

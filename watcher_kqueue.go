@@ -89,11 +89,11 @@ func (w *watcher) runKqueueLoop(ctx context.Context, k *kqueue, done chan struct
 		w.logDebug("kqueue platform shutting down")
 		k.mu.Lock()
 		for fd := range k.wds {
-			unix.Close(fd)
+			_ = unix.Close(fd)
 		}
-		unix.Close(k.kqFd)
-		unix.Close(k.wakeRead)
-		unix.Close(k.wakeWrite)
+		_ = unix.Close(k.kqFd)
+		_ = unix.Close(k.wakeRead)
+		_ = unix.Close(k.wakeWrite)
 		k.wds = nil
 		k.paths = nil
 		k.dirs = nil
@@ -390,7 +390,7 @@ func (k *kqueue) batchAddWatchesLocked(entries []struct {
 	if _, err := unix.Kevent(k.kqFd, changes, nil, nil); err != nil {
 		// If batch registration fails, close all FDs we just opened
 		for _, a := range added {
-			unix.Close(a.fd)
+			_ = unix.Close(a.fd)
 		}
 		return err
 	}
@@ -482,7 +482,7 @@ func (k *kqueue) addSingleWatchLocked(path string) error {
 	}
 
 	if _, err := unix.Kevent(k.kqFd, events, nil, nil); err != nil {
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		return err
 	}
 

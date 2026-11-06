@@ -27,28 +27,6 @@ func canonicalTempDir(t testing.TB) string {
 	return path
 }
 
-// mockWriter is a thread-safe io.Writer for capturing log messages
-type mockWriter struct {
-	mu       sync.Mutex
-	messages []string
-}
-
-func (mw *mockWriter) Write(p []byte) (n int, err error) {
-	mw.mu.Lock()
-	defer mw.mu.Unlock()
-	mw.messages = append(mw.messages, string(p))
-	return len(p), nil
-}
-
-func (mw *mockWriter) getMessages() []string {
-	mw.mu.Lock()
-	defer mw.mu.Unlock()
-	// Return a copy
-	msgs := make([]string, len(mw.messages))
-	copy(msgs, mw.messages)
-	return msgs
-}
-
 // TestMain init random temp dir
 func TestMain(m *testing.M) {
 	var err error
@@ -569,14 +547,12 @@ func TestWatcher(t *testing.T) {
 
 	t.Run("Paths", func(t *testing.T) {
 		// Setup a temporary directory structure
-		rootDir, _ := os.MkdirTemp("", "paths-root-*")
-		defer os.RemoveAll(rootDir)
+		rootDir := t.TempDir()
 		dir1 := filepath.Join(rootDir, "dir1")
 		_ = os.Mkdir(dir1, 0755)
 		dir2 := filepath.Join(rootDir, "dir2")
 		_ = os.Mkdir(dir2, 0755)
-		dir3, _ := os.MkdirTemp("", "paths-abs-*")
-		defer os.RemoveAll(dir3)
+		dir3 := t.TempDir()
 
 		// Change CWD to test relative paths
 		originalCwd, _ := os.Getwd()

@@ -13,6 +13,8 @@ var osPrefixes = []string{"~", "._", ".DS_Store", ".localized", ".Trash", ".Tras
 var osSuffixes = []string{".tmp", ".bak", ".swp", ".swo", "~", ".plist", ".download", ".part"}
 
 // kqueueOpenFlags is the flag used to open files for kqueue monitoring on macOS
+//
+//nolint:unused // Used by the macOS kqueue backend when CGO is disabled.
 const kqueueOpenFlags = unix.O_EVTONLY
 
 // platformNotifier defines the interface for Darwin backend implementations (FSEvents, kqueue)

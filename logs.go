@@ -1,6 +1,7 @@
 package fswatcher
 
 import (
+	"context"
 	"log/slog"
 )
 
@@ -49,5 +50,5 @@ func (w *watcher) log(level Severity, msg string, args ...any) {
 	if w.logger == nil {
 		return
 	}
-	w.logger.Log(nil, slog.Level(level), msg, args...)
+	w.logger.Log(context.Background(), slog.Level(level), msg, args...)
 }

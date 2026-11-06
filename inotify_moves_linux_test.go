@@ -108,7 +108,7 @@ func TestInotifyOverflowRebuildsDirectoryCoverage(t *testing.T) {
 	w := wi.(*watcher)
 	p, err := newInotify()
 	require.NoError(t, err)
-	defer unix.Close(p.fd)
+	t.Cleanup(func() { require.NoError(t, unix.Close(p.fd)) })
 	defer w.aggregator.close()
 	require.NoError(t, p.addWatch(w, &WatchPath{Path: root, Depth: WatchNested}))
 	oldWD := p.trie.findNode(old).wd

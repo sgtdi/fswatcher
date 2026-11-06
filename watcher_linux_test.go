@@ -289,7 +289,7 @@ func TestInotify_RemoveWatchCleansState(t *testing.T) {
 
 	p, err := newInotify()
 	require.NoError(t, err)
-	defer unix.Close(p.fd)
+	t.Cleanup(func() { require.NoError(t, unix.Close(p.fd)) })
 
 	wp, err := validateWatchPath(dir, WatchNested)
 	require.NoError(t, err)

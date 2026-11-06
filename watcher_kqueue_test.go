@@ -160,10 +160,9 @@ func TestRunKqueueLoop(t *testing.T) {
 
 func TestProcessKqueueEvents(t *testing.T) {
 	// Create a temp file
-	tmpFile, err := os.CreateTemp(tempDir, "test_event_*.txt")
+	tmpFile, err := os.CreateTemp(canonicalTempDir(t), "test_event_*.txt")
 	require.NoError(t, err)
-	defer os.Remove(tmpFile.Name())
-	tmpFile.Close()
+	require.NoError(t, tmpFile.Close())
 
 	w, err := New(WithPath(filepath.Dir(tmpFile.Name())))
 	require.NoError(t, err)
@@ -211,13 +210,10 @@ func TestProcessKqueueEvents(t *testing.T) {
 }
 
 func TestScanDirectoryLocked(t *testing.T) {
-	tmpDir, err := os.MkdirTemp(tempDir, "test_scan_dir_*")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	tmpDir := canonicalTempDir(t)
 
 	file1 := filepath.Join(tmpDir, "file1.txt")
-	err = os.WriteFile(file1, []byte("content"), 0644)
-	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(file1, []byte("content"), 0644))
 
 	w, err := New(WithPath(tmpDir))
 	require.NoError(t, err)
@@ -255,21 +251,16 @@ func TestScanDirectoryLocked(t *testing.T) {
 }
 
 func TestAddWatch(t *testing.T) {
-	tmpDir, err := os.MkdirTemp(tempDir, "test_add_watch_*")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	tmpDir := canonicalTempDir(t)
 
 	subDir := filepath.Join(tmpDir, "subdir")
-	err = os.Mkdir(subDir, 0755)
-	require.NoError(t, err)
+	require.NoError(t, os.Mkdir(subDir, 0755))
 
 	file1 := filepath.Join(tmpDir, "file1.txt")
-	err = os.WriteFile(file1, []byte("content"), 0644)
-	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(file1, []byte("content"), 0644))
 
 	file2 := filepath.Join(subDir, "file2.txt")
-	err = os.WriteFile(file2, []byte("content"), 0644)
-	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(file2, []byte("content"), 0644))
 
 	w, err := New()
 	require.NoError(t, err)
@@ -514,10 +505,9 @@ func closeKqueueForTest(k *kqueue) {
 }
 
 func TestAddSingleWatchLocked(t *testing.T) {
-	tmpFile, err := os.CreateTemp(tempDir, "test_single_watch_*.txt")
+	tmpFile, err := os.CreateTemp(canonicalTempDir(t), "test_single_watch_*.txt")
 	require.NoError(t, err)
-	defer os.Remove(tmpFile.Name())
-	tmpFile.Close()
+	require.NoError(t, tmpFile.Close())
 
 	w, err := New()
 	require.NoError(t, err)
@@ -544,13 +534,10 @@ func TestAddSingleWatchLocked(t *testing.T) {
 }
 
 func TestRemoveWatch(t *testing.T) {
-	tmpDir, err := os.MkdirTemp(tempDir, "test_remove_watch_*")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	tmpDir := canonicalTempDir(t)
 
 	file1 := filepath.Join(tmpDir, "file1.txt")
-	err = os.WriteFile(file1, []byte("content"), 0644)
-	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(file1, []byte("content"), 0644))
 
 	w, err := New()
 	require.NoError(t, err)

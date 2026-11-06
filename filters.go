@@ -217,12 +217,7 @@ func (w *watcher) isIgnoredPattern(path string) bool {
 	return false
 }
 
-// isHiddenPathWithin reports whether a path is hidden, checking ancestors only
-// as far as the watched root when the path belongs to one.
-func isHiddenPathWithin(path, root string) bool {
-	return isPlatformHidden(path, root)
-}
-
+// isHiddenPathWithin checks hidden ancestors only as far as the watched root.
 func (w *watcher) isHiddenPathWithin(path, root string) bool {
 	if runtime.GOOS == "windows" {
 		return walkPathAncestors(path, root, func(current string) bool {
@@ -234,15 +229,6 @@ func (w *watcher) isHiddenPathWithin(path, root string) bool {
 	}
 	return walkPathAncestors(path, root, func(current string) bool {
 		return isDotHiddenComponent(current) || w.hiddenAttributeCache.isHidden(current, isPlatformHiddenComponent)
-	})
-}
-
-func isPlatformHidden(path, root string) bool {
-	if runtime.GOOS == "windows" {
-		return walkPathAncestors(path, root, isPlatformHiddenComponent)
-	}
-	return walkPathAncestors(path, root, func(current string) bool {
-		return isDotHiddenComponent(current) || isPlatformHiddenComponent(current)
 	})
 }
 

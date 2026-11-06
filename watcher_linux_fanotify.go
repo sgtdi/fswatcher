@@ -119,7 +119,7 @@ func (w *watcher) runFanotifyLoop(ctx context.Context, p *fanotify, done chan st
 		w.logError("fanotify eventfd error", "error", err)
 		return
 	}
-	defer unix.Close(eventFD)
+	defer func() { _ = unix.Close(eventFD) }()
 
 	stopWake := startCancellationWakeup(ctx, func() {
 		var val uint64 = 1
@@ -196,7 +196,7 @@ func (w *watcher) runFanotifyLoop(ctx context.Context, p *fanotify, done chan st
 			if meta.Fd >= 0 {
 				// Rarely happen with REPORT_DFID_NAME
 				path, err = os.Readlink(fmt.Sprintf("/proc/self/fd/%d", meta.Fd))
-				unix.Close(int(meta.Fd))
+				_ = unix.Close(int(meta.Fd))
 			} else if meta.Fd == unix.FAN_NOFD {
 				// Parse the additional info records to get the FID and Name
 				path, err = w.parseFanotifyInfo(p, buf[offset+unix.FAN_EVENT_METADATA_LEN:offset+int(meta.Event_len)])
@@ -591,10 +591,9 @@ func (p *fanotify) reconcileWatchDirs(w *watcher) {
 func (p *fanotify) closeMarks() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Shutdown is best-effort; closing the fanotify group releases all marks.
 	for path := range p.markRefs {
-		if err := p.markDirectory(path, false); err != nil && !errors.Is(err, unix.ENOENT) {
-			// Shutdown is best-effort; closing the fanotify group releases marks.
-		}
+		_ = p.markDirectory(path, false)
 	}
 	p.paths = make(map[string]struct{})
 	p.roots = make(map[string]*fanotifyRoot)

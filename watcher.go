@@ -97,8 +97,8 @@ type watcher struct {
 	readyChan   chan struct{}
 	scanCtx     context.Context
 	scanMu      sync.Mutex
-	scanPending map[string]struct{}
-	scanWorker  bool
+	scanPending map[string]struct{} //nolint:unused // Used by FSEvents overflow recovery on macOS with CGO.
+	scanWorker  bool                //nolint:unused // Used by FSEvents overflow recovery on macOS with CGO.
 	scanWorkers sync.WaitGroup
 
 	// Components
@@ -120,7 +120,7 @@ type watcher struct {
 	logger  *slog.Logger
 
 	// Darwin fields
-	handle   uintptr
+	handle   uintptr //nolint:unused // Used by the FSEvents CGO callback registry.
 	streams  map[string]any
 	streamMu sync.Mutex
 }
@@ -270,7 +270,9 @@ func (w *watcher) Watch(ctx context.Context) (retErr error) {
 		w.isShuttingDown.Store(true)
 		w.isRunning.Store(false)
 		w.opsMu.Unlock()
+		// Wait for any in-flight queueScan registration before waiting on workers.
 		w.scanMu.Lock()
+		//nolint:staticcheck // SA2001: this lock/unlock is a barrier against WaitGroup.Add in queueScan.
 		w.scanMu.Unlock()
 		w.scanWorkers.Wait()
 		w.aggregator.close()
@@ -550,9 +552,7 @@ func (w *watcher) Log(level Severity, msg string, args ...any) {
 	case SeverityDebug:
 		w.logDebug(msg, args...)
 	default:
-		if w.logger != nil {
-			w.logger.Log(nil, slog.Level(level), msg, args...)
-		}
+		w.log(level, msg, args...)
 	}
 }
 
@@ -649,7 +649,9 @@ func (w *watcher) sendToChannel(event WatchEvent) {
 	}
 }
 
-// scanDirectory performs a manual scan of a directory and emits events for its contents
+// queueScan coalesces FSEvents recovery scans and registers them with shutdown.
+//
+//nolint:unused // Called by the macOS FSEvents backend when CGO is enabled.
 func (w *watcher) queueScan(path string) {
 	w.scanMu.Lock()
 	defer w.scanMu.Unlock()
@@ -817,6 +819,8 @@ func (w *watcher) findMostSpecificWatchPath(path string) *WatchPath {
 // nativeWatchNeeded reports whether a configured root still needs a descriptor
 // for path. kqueue also watches direct children of top-level roots; inotify
 // needs directory descriptors only for recursive roots and explicit roots.
+//
+//nolint:unused // Used by inotify and kqueue; Windows and FSEvents watch whole roots.
 func (w *watcher) nativeWatchNeeded(path, excludedRoot string, directChildren bool) bool {
 	w.pathMu.RLock()
 	defer w.pathMu.RUnlock()
